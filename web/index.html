@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>笔记本电源自适应</title>
+<style>
+  /* GHelper 风格的紧凑深色界面：信息密度高、控件行式排布、窗口矮 */
+  :root{
+    --bg:#18191C; --card:#222428; --card2:#2A2D32; --border:#33363C;
+    --text:#E7E9EC; --muted:#969CA5;
+    --accent:#4C8DFF; --accent-soft:#1E2A3F; --green:#4ADE80; --amber:#FBBF24; --red:#F87171;
+    --accent-rgb:76,141,255;
+  }
+  *{box-sizing:border-box}
+  html{color-scheme:dark}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:"Microsoft YaHei UI","Segoe UI",system-ui,-apple-system,sans-serif;
+    font-size:12px; padding:10px; line-height:1.35;
+    -webkit-font-smoothing:antialiased;
+    /* 固定尺寸小面板：滚动条比裁掉几像素 padding 更难看。
+       告警行偶发增高时宁可裁掉底部留白，也不出滚动条。 */
+    overflow:hidden;
+  }
+  .wrap{max-width:660px;margin:0 auto;display:flex;flex-direction:column;gap:7px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:7px;padding:8px 10px}
+  .cols{display:flex;gap:7px;align-items:flex-start}
+  .cols>.col{flex:1;display:flex;flex-direction:column;gap:7px;min-width:0}
+
+  header{display:flex;align-items:center;gap:8px}
+  .logo{width:26px;height:26px;border-radius:6px;background:var(--accent);color:#fff;
+        display:flex;align-items:center;justify-content:center;font-size:14px;flex:none}
+  h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.2px}
+  .sub{font-size:10.5px;color:var(--muted);margin-top:1px;
+       white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px}
+  .htips{margin-left:auto;display:flex;gap:5px;flex:none}
+  .chip{font-size:10.5px;padding:3px 8px;border-radius:5px;background:var(--card2);
+        color:var(--muted);white-space:nowrap}
+  .chip.power{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .chip.batt.good{background:#15301F;color:var(--green);font-weight:600}
+  .chip.batt.warn{background:#33280F;color:var(--amber);font-weight:600}
+  .chip.batt.low{background:#3A1A1C;color:var(--red);font-weight:600}
+
+  .hero{padding:8px 10px}
+  .hero .mode{font-size:16px;font-weight:700;letter-spacing:.2px}
+  .hero .autoTag{float:right;font-size:10.5px;font-weight:600}
+  .hero .desc{font-size:10.5px;color:var(--muted);margin-top:2px}
+
+  /* 五个档位一行排布，省掉一整行高度 */
+  .modes{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}
+  button.mode{border:1px solid var(--border);background:var(--card);border-radius:6px;
+        padding:6px 2px;cursor:pointer;transition:.12s;font-family:inherit;
+        color:var(--text);text-align:center;line-height:1.15}
+  button.mode:hover{border-color:#4A5568;background:var(--card2)}
+  button.mode .ico{font-size:14px;display:block;margin-bottom:1px}
+  button.mode .lb{font-size:10.5px;font-weight:600;display:block}
+  button.mode.on{background:var(--accent);border-color:var(--accent);color:#fff;
+           box-shadow:0 2px 8px rgba(var(--accent-rgb),.35)}
+
+  button.autoBanner{width:100%;border:1px solid var(--border);background:var(--card);
+    color:var(--accent);border-radius:6px;padding:7px;font-size:11.5px;font-weight:600;
+    cursor:pointer;font-family:inherit}
+  button.autoBanner:hover{background:var(--card2)}
+  button.autoBanner.off{color:var(--muted);font-weight:400}
+
+  .ct{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}
+  .ct .t{font-size:11.5px;font-weight:600;color:var(--text)}
+  .ct .r{margin-left:auto;font-size:10.5px;color:var(--green);font-weight:600;
+         text-align:right;max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ct .r.warn{color:var(--amber)}
+  .hint{font-size:10.5px;color:var(--muted);line-height:1.3}
+  .row{display:flex;align-items:center;gap:7px;margin:3px 0}
+  .lbar{flex:1;height:6px;border-radius:3px;background:#15171A;overflow:hidden;min-width:64px}
+  .lbar>i{display:block;height:100%;border-radius:3px;transition:width .3s,background .3s}
+  .load-pct{font-size:11px;color:var(--text);font-weight:600;min-width:34px;text-align:right}
+  .pwr{flex:1;min-width:96px;display:flex;flex-direction:column;gap:3px}
+  .pwr-head{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)}
+  .pwr-v{color:var(--text);font-variant-numeric:tabular-nums;font-weight:600}
+  .okline{font-size:10.5px;color:var(--green)}
+  .advline{font-size:10.5px;color:var(--amber);white-space:pre-line;margin-top:2px}
+
+  .fanbtns{display:flex;gap:5px;margin-top:6px}
+  button.btn{border:1px solid var(--border);background:var(--card2);color:var(--text);
+    border-radius:5px;padding:5px 4px;font-size:10.5px;cursor:pointer;font-family:inherit;flex:1}
+  button.btn:hover{border-color:#4A5568}
+  button.btn.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+</style>
+<script>
+/* ============ 多标签互斥：同一时刻只留一个面板标签，重复的自动关闭 ============ */
+(function(){
+  var KEY = "lp_panel_claim";
+  var myId = Math.random().toString(36).slice(2);
+  function claim(){ return {id: myId, ts: Date.now()}; }
+  function readClaim(){
+    try{ return JSON.parse(localStorage.getItem(KEY) || "null"); }catch(e){ return null; }
+  }
+  function writeClaim(c){ try{ localStorage.setItem(KEY, JSON.stringify(c)); }catch(e){} }
+
+  var checked = 0;
+  function tick(){
+    var c = readClaim();
+    if(!c || Date.now() - (c.ts||0) > 3500){
+      writeClaim(claim());
+      checked = 0;
+      return true;
+    }
+    if(c.id === myId){
+      writeClaim(claim());           // 我是主：续约
+      return true;
+    }
+    checked++;
+    if(checked >= 2){
+      try{ window.close(); }catch(e){}
+      setTimeout(function(){
+        document.documentElement.innerHTML = "<body style=\"font:15px system-ui;padding:40px;color:#555\">✔ 面板已在另一个标签页打开，本页是多余的，可以关闭了。";
+        document.title = "面板重复标签";
+      }, 300);
+      return false;
+    }
+    return false;
+  }
+  setTimeout(function(){
+    if(!tick()){ setInterval(function(){ tick(); }, 1200); }
+    else{ setInterval(function(){ tick(); }, 1200); }
+  }, 250 + Math.random()*400);
+})();
+</script>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">⚡</div>
+    <div>
+      <h1>笔记本电源自适应</h1>
+      <div class="sub" id="fg">—</div>
+    </div>
+    <div class="htips">
+      <span class="chip power" id="power">—</span>
+      <span class="chip batt good" id="batt">—</span>
+    </div>
+  </header>
+
+  <div class="card hero">
+    <span class="autoTag" id="autoTag">自动判定</span>
+    <div class="mode" id="mode">—</div>
+    <div class="desc" id="reason"></div>
+  </div>
+
+  <div class="modes" id="modes"></div>
+
+  <button class="autoBanner" id="autoBtn">自动判定已开启</button>
+
+  <div class="cols">
+  <div class="col">
+  <div class="card" id="battCard">
+    <div class="ct"><span class="t">电池与续航</span><span class="r" id="battState">—</span></div>
+    <div class="row">
+      <div class="lbar"><i id="battBar" style="width:0%"></i></div>
+      <span class="load-pct" id="battPct">—</span>
+    </div>
+    <div class="row" style="margin:2px 0 0">
+      <span class="hint" id="battDetail">—</span>
+    </div>
+    <div class="row" style="margin:2px 0 0">
+      <span class="hint" id="battHw">—</span>
+    </div>
+    <div class="okline" id="battOk" style="margin-top:3px"></div>
+    <div class="advline" id="battAdv"></div>
+  </div>
+
+  <div class="card" id="loadCard">
+    <div class="ct"><span class="t">负载状态</span><span class="r" id="loadState">—</span></div>
+    <div class="row">
+      <div class="lbar"><i id="loadBar" style="width:0%"></i></div>
+      <span class="load-pct" id="loadPct">0%</span>
+    </div>
+    <div class="hint" id="loadDetail">CPU — · 磁盘 — · 网络 — · 独显 —</div>
+  </div>
+  </div>
+
+  <div class="col">
+  <div class="card" id="thermalCard">
+    <div class="ct"><span class="t">散热与风扇</span><span class="r" id="thAsus" style="color:var(--muted)">—</span></div>
+    <div class="hint" id="thFan">风扇 — · 温度 —</div>
+    <div class="fanbtns">
+      <button class="btn" id="thAuto">自动</button>
+      <button class="btn" id="thQuiet">静音</button>
+      <button class="btn" id="thPerf">性能</button>
+    </div>
+  </div>
+
+  <div class="card" id="allocCard">
+    <div class="ct"><span class="t">游戏功耗分配</span><span class="r" id="allocVerdict" style="color:var(--muted)">—</span></div>
+    <div class="row">
+      <div class="pwr">
+        <div class="pwr-head"><span>CPU</span><span class="pwr-v" id="pwCpu">—</span></div>
+        <div class="lbar"><i id="pwCpuBar" style="width:0%"></i></div>
+      </div>
+      <span class="hint" id="pwCpuT">—</span>
+    </div>
+    <div class="row">
+      <div class="pwr">
+        <div class="pwr-head"><span>独显</span><span class="pwr-v" id="pwGpu">—</span></div>
+        <div class="lbar"><i id="pwGpuBar" style="width:0%"></i></div>
+      </div>
+      <span class="hint" id="pwGpuT">—</span>
+    </div>
+    <div class="row">
+      <div class="pwr">
+        <div class="pwr-head"><span>整机</span><span class="pwr-v" id="pwSys">—</span></div>
+        <div class="lbar"><i id="pwSysBar" style="width:0%"></i></div>
+      </div>
+    </div>
+    <div class="hint" id="allocWhy"></div>
+  </div>
+  </div>
+  </div>
+</div>
+
+<script>
+const MODES = [
+  {k:"gaming",   ico:"🎮", lb:"游戏"},
+  {k:"office",   ico:"📄", lb:"办公"},
+  {k:"battery",  ico:"🌱", lb:"续航"},
+  {k:"saver",    ico:"🪫", lb:"省电"},
+  {k:"balanced", ico:"⚖️", lb:"平衡"},
+];
+const MODE_LABEL = {gaming:"游戏·最高帧", office:"办公·跟手", battery:"续航·最长",
+                    saver:"极限续航", balanced:"系统平衡"};
+
+let state = {};
+
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function fmtDur(s){
+  if(!s&&s!==0) return "—";
+  if(s<60) return s+" 秒";
+  if(s<3600) return (s/60).toFixed(0)+" 分";
+  return (s/3600).toFixed(1)+" 小时";
+}
+function w1(v){ return (v===null||v===undefined) ? "—" : (Math.round(v*10)/10).toFixed(1); }
+function w0(v){ return (v===null||v===undefined) ? "—" : String(Math.round(v)); }
+function pct(v){ return (v===null||v===undefined) ? "—" : Math.round(v)+"%"; }
+
+function renderModes(){
+  const box = document.getElementById("modes");
+  try{
+    box.innerHTML = MODES.map(m=>
+      `<button class="mode ${state.mode===m.k?"on":""}" data-k="${m.k}">
+         <span class="ico">${m.ico}</span><span class="lb">${m.lb}</span>
+       </button>`).join("");
+  }catch(e){ document.title = "面板渲染异常(RM): " + ((e&&e.message)||e); return; }
+  if(!box.firstChild){ document.title = "面板渲染异常(RM-empty)"; return; }
+  box.querySelectorAll(".mode").forEach(b=>b.onclick=()=>post("/api/mode",{mode:b.dataset.k}));
+}
+
+function render(){
+  // 字体比例（config.panel_font_scale，0.85~1.3）：CSS zoom 直接缩放整个面板内容。
+  // 窗口大小不随它变——调大后底部可能需要滚动，属于预期行为
+  try{
+    var fs = parseFloat(state.panel_font_scale);
+    if(fs && Math.abs(fs-1)>0.01) document.documentElement.style.zoom = fs;
+    else document.documentElement.style.zoom = "";
+  }catch(e){}
+  document.getElementById("mode").textContent = state.mode_label||"—";
+  document.getElementById("reason").textContent = "原因：" + (state.reason||"—");
+  const auto = state.auto;
+  const tag = document.getElementById("autoTag");
+  tag.textContent = auto ? "自动判定" : "手动锁定";
+  tag.style.color = auto ? "var(--green)" : "var(--amber)";
+  const ab = document.getElementById("autoBtn");
+  ab.textContent = auto ? "✔ 自动判定已开启" : "自动判定已关闭（点此开启）";
+  ab.className = "autoBanner" + (auto?"":" off");
+
+  const p = document.getElementById("power");
+  // 只显示电源状态；电量在旁边 🔋 chip 里（两个 chip 都带 % 就重复了）
+  p.textContent = state.ac ? "插电" : "离电";
+  const b=document.getElementById("batt");
+  // 顶部 chip 统一显示电量百分比（「已接电源」四个字电池卡标题里已有，别重复）
+  if(state.battery===null||state.battery===undefined){
+    b.textContent = state.ac ? "电源" : "电池";
+    b.className="chip batt";
+  }else{
+    b.textContent="🔋 "+state.battery+"%";
+    b.className="chip batt "+(state.ac?"good":(state.battery>50?"good":state.battery>20?"warn":"low"));
+  }
+  const fgEl = document.getElementById("fg");
+  if(state.foreground){
+    // 去掉 .exe 后缀；不再拼《窗口标题》—— 标题又长又和程序名重复
+    fgEl.textContent = "前台 " + state.foreground.replace(/\.exe$/i, "");
+  }else{
+    fgEl.textContent = "跟随前台程序自动切换";
+  }
+
+  renderBatt();
+  renderLoad();
+  renderThermal();
+  renderAlloc();
+  renderModes();
+}
+
+function renderBatt(){
+  const B = state.battery_info||{};
+  const st = document.getElementById("battState");
+  const pctv = B.percent;
+  if(state.ac){
+    st.textContent = "已接电源" + (B.charging?"（充电中）":"");
+    st.className = "r";
+  }else{
+    st.textContent = (pctv==null?"电池":"电池 "+pctv+"%") + (B.discharging?"（放电中）":"");
+    st.className = "r" + (pctv!=null&&pctv<=20 ? " warn":"");
+  }
+  const bar = document.getElementById("battBar");
+  // pctv 为 null（ACPI 读失败）时按 0 画会变成一条满红的告警条，
+  // 和真正的低电量无法区分 —— 未知就置灰，跟旁边显示的「—」保持一致。
+  const pctKnown = (pctv!==null && pctv!==undefined);
+  bar.style.width = (pctKnown ? Math.max(0, Math.min(100, pctv)) : 0) + "%";
+  bar.style.background = !pctKnown ? "var(--track)"
+    : pctv>50 ? "var(--green)" : pctv>20 ? "#BA7517" : "var(--red)";
+  document.getElementById("battPct").textContent = (pctv===null||pctv===undefined)?"—":pctv+"%";
+
+  let eta = "预计剩余 —";
+  if(!state.ac && B.eta_minutes) eta = "预计剩余 " + fmtDur(B.eta_minutes*60);
+  else if(state.ac) eta = B.charging ? "充电中" : "已充满，随时可拔";
+  let s = eta;
+  if(B.health_pct!=null) s += " · 健康度 " + Math.round(B.health_pct) + "%";
+  const care = B.care||{};
+  if(care.enabled && care.score!=null) s += " · 养护 " + care.score + " 分";
+  document.getElementById("battDetail").textContent = s;
+
+  let hw = "";
+  if(B.capacity_mwh && B.full_mwh)
+    hw = (B.capacity_mwh/1000).toFixed(1) + " / " + (B.full_mwh/1000).toFixed(1) + " Wh";
+  if(B.display_hz!=null) hw += (hw?" · ":"") + "屏幕 " + B.display_hz + " Hz";
+  if(!state.ac) hw += (hw?" · ":"") + "核显模式";
+  document.getElementById("battHw").textContent = hw;
+
+  const ok = document.getElementById("battOk");
+  const adv = document.getElementById("battAdv");
+  const cl = (care.charge_limit)||{};
+  const pd = state.pd||{};
+  let okText = "", advText = "";
+  if(state.ac){
+    if(cl.value!=null && cl.value<100) okText = "充电上限 "+cl.value+"%（养护模式）";
+    else if(state.alloc && state.alloc.enabled) okText = "功耗分配已启用";
+  }else{
+    const w = B.rate_avg_w||B.rate_w;
+    if(B.discharging && w) okText = "放电 " + w1(w) + " W";
+  }
+  if(pd.active){
+    let t = "PD 弱电源保护：" + (pd.stage_cn||"压制中");
+    if(pd.machine_w!=null) t += " · 整机 " + w0(pd.machine_w) + " W";
+    if(pd.supply_w!=null) t += " / 上限 " + w0(pd.supply_w) + " W";
+    if(pd.rate_w!=null && pd.rate_w>0) t += " · 电池放电 " + w1(pd.rate_w) + " W";
+    if(pd.stuck) t += "\n已达压制下限——建议降低画质或换回 200W 电源";
+    advText = t;
+  }else if(pd.supply_w!=null && state.ac){
+    // 没在压制但已经学到电源上限：告诉用户离供电天花板还有多少余量
+    // 整机功耗在「游戏功耗分配」卡里已有，这里只报上限和余量，避免重复
+    let t = "Type-C 供电 · 上限 " + w0(pd.supply_w) + " W · 余量 " +
+            w0(pd.supply_w - (pd.machine_w||0)) + " W";
+    if(pd.supply_w - (pd.machine_w||0) < 8) t += "\n余量吃紧，即将自动限帧保电池";
+    advText = t;
+  }else if(care.enabled && care.advice && care.advice.length){
+    advText = "电池养护：" + care.advice[0];
+  }
+  ok.textContent = okText;
+  adv.textContent = advText;
+}
+
+function renderLoad(){
+  const L = state.load||{};
+  const el = document.getElementById("loadState");
+  const st = L.state||"未知";
+  el.textContent = st + (L.heavy?" · 已保护":"");
+  el.className = "r" + (L.heavy?" warn":(st==="轻负载"?"":""));
+  const b = Math.max(0, Math.min(100, state.busy||0));
+  const bar = document.getElementById("loadBar");
+  bar.style.width = b + "%";
+  bar.style.background = b>=70 ? "var(--red)" : b>=40 ? "#BA7517" : "var(--green)";
+  document.getElementById("loadPct").textContent = b + "%";
+  const f = v => (v===null||v===undefined) ? "—" : Math.round(v)+"%";
+  document.getElementById("loadDetail").textContent =
+    "CPU " + f(L.cpu) + " · 磁盘 " + f(L.disk) + " · 网络 " + f(L.net) + " · 独显 " + f(L.gpu)
+    + (state.cooldown_left>0 ? " · 冷却 "+state.cooldown_left+"s" : "");
+}
+
+function renderThermal(){
+  const th = state.thermal||{};
+  const fan = state.fan||{};
+  const pctv = v => (v===null||v===undefined) ? "—" : (v+"%");
+  const degv = v => (v===null||v===undefined) ? "—" : (Math.round(v)+"℃");
+  const bits = [];
+  if(fan.fan_cpu!=null) bits.push("CPU 风扇 "+pctv(fan.fan_cpu));
+  if(fan.fan_gpu!=null) bits.push("GPU 风扇 "+pctv(fan.fan_gpu));
+  if(fan.temp_cpu!=null) bits.push(degv(fan.temp_cpu));
+  document.getElementById("thFan").textContent = bits.length? bits.join(" · ") : "风扇 —";
+  document.getElementById("thAsus").textContent =
+    "华硕性能模式：" + (fan.perf_label || "—");
+  const cur = th.mode||"auto";
+  [["thAuto","auto"],["thQuiet","quiet"],["thPerf","perf"]].forEach(([id,m])=>{
+    const btn=document.getElementById(id);
+    btn.className = "btn" + (cur===m?" on":"");
+    btn.textContent = {auto:"✓ 自动",quiet:"静音",perf:"性能"}[m];
+  });
+}
+
+function renderAlloc(){
+  const A = state.alloc||{};
+  const el = document.getElementById("allocVerdict");
+  if(A.ok === false){
+    el.textContent = "传感器不可用";
+    el.className = "r warn";
+  }else{
+    el.textContent = A.verdict_cn || "判定中";
+    el.className = "r";
+    if(!state.ac) el.textContent = "非游戏档，不参与功耗重分配";
+  }
+  const set = (id, barid, tid, val, denom, temp, color) => {
+    const el = document.getElementById(id);
+    if(el) el.textContent = (val===null||val===undefined) ? "—" : (w1(val)+" W");
+    // tid 可为 null（整机行没有温度标签）——旧代码在这里抛异常，
+    // 把整个渲染链炸断，五档按钮因此从未被渲染出来
+    if(tid){
+      const te = document.getElementById(tid);
+      if(te) te.textContent = temp;
+    }
+    const b = document.getElementById(barid);
+    if(b && val!==null && val!==undefined && denom>0){
+      b.style.width = Math.max(0, Math.min(100, 100*val/denom)) + "%";
+      b.style.background = color;
+    }
+  };
+  const env = A.envelope_w || 110;
+  const tgp = A.gpu_tgp_max || 100;
+  set("pwCpu","pwCpuBar","pwCpuT",A.cpu_w,env, A.cpu_temp==null?"—":Math.round(A.cpu_temp)+"℃","#5B8DEF");
+  set("pwGpu","pwGpuBar","pwGpuT",A.gpu_w,tgp,
+      (A.gpu_temp==null?"—":Math.round(A.gpu_temp)+"℃")+" · "+pct(A.gpu_util),"#C0504D");
+  set("pwSys","pwSysBar",null,A.system_w,env,null,"#8B5CF6");
+  if(state.ac===false){
+    const ge = (state.gpu_eco||{});
+    if(ge.eco===1) document.getElementById("pwGpu").textContent = "已断电";
+  }
+  const ev = (A.events && A.events.length) ? A.events[A.events.length-1] : "";
+  const whyEl = document.getElementById("allocWhy");
+  // 底部行：去掉「本次判断：」前缀；与右上角完全相同时不再重复一遍
+  const why = (A.reason && A.reason !== el.textContent) ? A.reason : "";
+  whyEl.textContent = why + (ev ? (why ? " ｜ " : "") + "最近动作 " + ev : "");
+}
+
+async function get(u){const r=await fetch(u);return r.json();}
+async function post(u,d){const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(d||{})});return r.json();}
+
+async function tick(){
+  try{
+    state = await get("/api/status");
+    render();
+  }catch(e){
+    // 渲染链上任何一环异常都不该无声无息（曾经 renderModes 静默失效没人发现）
+    var st = ((e && e.stack) || "").split("\n")[1] || "";
+    document.title = "面板渲染异常: " + ((e && e.message) || e) + " @" + st.trim().slice(0,80);
+  }
+}
+
+document.getElementById("autoBtn").onclick = ()=>post("/api/auto",{on:!state.auto});
+document.getElementById("thAuto").onclick  = ()=>setThermal("auto");
+document.getElementById("thQuiet").onclick = ()=>setThermal("quiet");
+document.getElementById("thPerf").onclick  = ()=>setThermal("perf");
+async function setThermal(m){
+  await post("/api/thermal_set",{mode:m});
+  tick();
+}
+
+tick();
+setInterval(tick, 2000);
+
+/* UI 调试探针：URL 带 ?probe 时把内容真实底边写进标题，
+   供 headless 流程测量「无滚动条」目标高度用，正常运行零开销。
+   注意 scrollHeight 会被视口高度托底，必须量 .wrap 的实际矩形 */
+if(location.search.indexOf("probe")>=0){
+  setTimeout(function(){
+    var r = document.querySelector(".wrap").getBoundingClientRect();
+    document.title = "BOTTOM=" + Math.ceil(r.bottom) +
+      " contentH=" + Math.ceil(r.height) + " win=" + window.innerHeight +
+      " scroll=" + (document.documentElement.scrollHeight > window.innerHeight ? "YES" : "no");
+  }, 3500);
+}
+</script>
+</body>
+</html>

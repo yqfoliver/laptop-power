@@ -1,0 +1,61 @@
+# ============================================================
+# 运行时数据 / 本机配置（含个人路径与标定值，不入库）
+# ============================================================
+config.json
+config.json.bak
+learn.json
+learn.json.bak
+learn.json.old
+battery_care.json
+clamshell.json
+battery_report.xml
+面板地址.txt
+run.txt
+*.log
+*.csv
+
+# ============================================================
+# 构建产物 —— exe 通过 GitHub Release 分发，不进仓库
+# ============================================================
+build/
+dist/
+*.exe
+*.exe.bak
+__pycache__/
+*.pyc
+*.pyo
+
+# ============================================================
+# 视频工程（含成片与面板实拍，体积 290MB，另行分发）
+# ============================================================
+video/
+*.mp4
+*.webm
+
+# ============================================================
+# 一次性排查脚本 / 抓图 / 浏览器残留（不具复用价值）
+# ============================================================
+_shot_panel.py
+allproc_watch.py
+cdp_trap.py
+close_ghost_windows.py
+diag_*.py
+fix_edge_session.py
+monitor_edge.py
+probe_pdh.py
+probe_power.py
+relaunch.py
+restart_*.py
+wait_up.py
+make_lnk.py
+atkmini.spec
+atkmini2.spec
+edge_session_backup/
+# Playwright / Edge 浏览器 profile 残留（数千个文件）
+tools/_*/
+*.tmp
+*.png
+*.bak
+*.old
+*.lnk          # 快捷方式内含本机绝对路径
+发布到GitHub说明.md
