@@ -2,7 +2,7 @@ Option Explicit
 Dim py, fso, sh, app, ts
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("Wscript.Shell")
-app = "C:\Users\yqfol\WorkBuddy\2026-10-03-08-01-21\laptop-power\笔记本电源自适应.exe"
+app = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "笔记本电源自适应.exe")
 sh.CurrentDirectory = fso.GetParentFolderName(app)
 sh.Run """" & app & """", 0, False
 WScript.Quit 0

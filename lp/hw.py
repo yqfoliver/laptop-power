@@ -727,7 +727,7 @@ def gaming_env() -> dict:
 #   · 直接改 HKLM 注册表 → 非管理员，拒绝访问
 # ⇒ 程序只「读 + 建议 + 展示」，设定动作交给 MyASUS（其服务以 SYSTEM 权限写 EC）。
 _ASUS_CHARGE_KEYS = (
-    # 新机型：TUF A14 (FA401WV) 实测命中，值 = 100
+    # 新机型实测命中，值 = 100
     (winreg.HKEY_LOCAL_MACHINE,
      r"SOFTWARE\ASUS\ASUS System Control Interface\AsusOptimization\ASUS Keyboard Hotkeys",
      "ChargingRate"),

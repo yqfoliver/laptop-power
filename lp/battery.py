@@ -16,7 +16,7 @@
   BATTERY_STATUS.Rate(mW)                                     -> 实时充/放电功率（放电为正）
   => 再配上满充容量就能算：剩余电量 %、按当前功率还能撑多久
 
-本机实测（TUF A14 FA401WV，2026-10-04）：
+本机实测（2026-10-04）：
   设计容量 73000 mWh，满充容量 60536 mWh -> 健康度 82.9%
   插电满充时 PowerState=0x1（AC 在线）、Rate=0 mW
 """
@@ -270,7 +270,7 @@ class BatteryMonitor:
         self.capacity_mwh = int(bs.Capacity) or None
         self.voltage_v = round(bs.Voltage / 1000.0, 3) if bs.Voltage else None
         rate = bs.Rate / 1000.0
-        # 本机（ASUS FA401WV）固件放电时 Rate 报负值；统一成「放电为正、充电为负」
+        # 本机固件放电时 Rate 报负值，统一成「放电为正、充电为负」
         if (self.state & DISCHARGING) and rate < 0:
             rate = -rate
         elif (self.state & CHARGING) and rate > 0:

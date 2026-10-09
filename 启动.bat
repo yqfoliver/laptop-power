@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
 
@@ -17,13 +17,13 @@ if exist "%~dp0_runtime\python\pythonw.exe" set "PYW=%~dp0_runtime\python\python
 if exist "%~dp0_runtime\python\python.exe"  set "PY=%~dp0_runtime\python\python.exe"
 
 if not defined PYW (
-  if exist "C:\Users\yqfol\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe" (
-    set "PYW=C:\Users\yqfol\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe"
+  if exist "%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe" (
+    set "PYW=%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe"
   )
 )
 if not defined PY (
-  if exist "C:\Users\yqfol\.workbuddy\binaries\python\versions\3.13.12\python.exe" (
-    set "PY=C:\Users\yqfol\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+  if exist "%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\python.exe" (
+    set "PY=%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\python.exe"
   )
 )
 

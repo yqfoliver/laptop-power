@@ -9,7 +9,7 @@ NVIDIA 独显监测（ctypes 直连 nvml.dll，零依赖）
   永远是 False -> 整个 NVML 通路（利用率 / 温度 / 功耗）从未生效。
   改用 _try_bind() 逐个符号绑定，缺一个不影响其余。
 
-本机实测能力（FA401WV / RTX 4060 Laptop / 驱动 5xx）：
+本机实测能力（RTX 4060 Laptop / 驱动 5xx）：
   可读：温度、功耗(mW)、SM 时钟、显存时钟、利用率、降频原因、温度阈值
   不可读：功耗墙 nvmlDeviceGetPowerManagementLimit -> rc=3 NOT_SUPPORTED
   不可写：nvmlDeviceSetPowerManagementLimit -> rc=4 INVALID_ARGUMENT

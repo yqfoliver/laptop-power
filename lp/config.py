@@ -52,7 +52,7 @@ DEFAULT_CONFIG = {
     "last_profile": "balanced",
 
     # ---------------- 游戏档 CPU/GPU 功耗分配（2026-10-04 新增） ----------------
-    # 本机（TUF A14 FA401WV）实测：独显功耗墙不可软件设定，唯一控制杆是 CPU 侧；
+    # 本机实测：独显功耗墙不可软件设定，唯一控制杆是 CPU 侧；
     # 压低 CPU 上限 -> Dynamic Boost 把省下的瓦数转给独显 -> 帧数上升。
     "alloc_enabled": True,
     "power_envelope_watts": 110,      # 整机 CPU+GPU 持续功耗上限（ASUS Turbo 模式口径）
