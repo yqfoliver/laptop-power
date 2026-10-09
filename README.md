@@ -113,6 +113,8 @@ schtasks /create /tn "LaptopPowerAuto" /xml "LaptopPowerAuto-task.xml" /f
 
 （需在**非沙箱的系统终端**执行；登录触发 + 延迟 15 秒。）
 
+导入前先把 `LaptopPowerAuto-task.xml` 里两处 `<你的用户名>` 换成你自己的路径。
+
 ---
 
 ## 已知边界
