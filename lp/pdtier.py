@@ -95,7 +95,11 @@ def policy(tier: str, supply_w: Optional[float] = None,
 
     machine_budget_w = None
     gpu_budget_w = None
-    if supply_w is not None and t not in ("wall",):
+    # 预算只对「标定过的档位」生效。unknown 时 supply_w 多半是充电下界 ——
+    # 下界算出的「预算」会把 100W 充电器按成 27W 的 GPU 配给（事故：
+    # 2026-10-10 换 100W 后面板仍显示弱电源/已切核显）。没标定就不设预算，
+    # 压制交给 PD 控制器的放电快速通道兜底。
+    if supply_w is not None and t not in ("wall", "unknown"):
         try:
             mb = float(supply_w) - reserve_w
             machine_budget_w = mb if mb > 0 else 0.0

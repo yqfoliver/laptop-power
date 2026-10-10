@@ -202,10 +202,20 @@ class PdBudget:
           · 往下掉慢了 = 电池正在放电还多放一会儿（事故）
         所以往上要迟钝、往下要敏感。65W PD 实到 ~58W，离 65W 阈值只有 7W
         余量，没有滞回的话估计值一抖就会让独显反复通断。
+
+        关键（2026-10-10 二修）：**只有放电标定的 firm 值才配定档**。
+        充电下界只能证明「电源 ≥ 这么多」，证明不了「弱」——65W 上轻载
+        下界 49W、100W 上重充下界 63.7W，全都被判成 weak 强制核显。
+        下界要抬过 weak 线轻而易举（电池充电功率大就行），所以拿它定档
+        必然把 100W 也按住。未标定 = unknown = 策略中性，等放电事件
+        （快速通道 3 秒）把值标实了再套对应档位。
         """
         try:
             from . import pdtier
         except Exception:
+            return "unknown"
+        if not self.supply_firm:
+            self._tier = "unknown"
             return "unknown"
         raw = pdtier.classify(self.supply_w)
         if self._tier == "weak" and raw not in ("weak", "unknown"):
@@ -290,6 +300,7 @@ class PdBudget:
         self.supply_firm = False
         self.predicted = False
         self.predict_armed = False
+        self._tier = "unknown"   # 换源后档位作废：新充电器是谁还没标定过
         self.pre_s = 0.0
         self.over_s = 0.0
         self.ok_s = 0.0

@@ -244,6 +244,37 @@ def test_tier_hysteresis():
        % pd2.tier())
 
 
+def test_non_firm_never_weak():
+    """充电下界不得定档（2026-10-10 二次事故）。
+
+    65W 上轻载下界 49W、100W 上重充下界 63.7W，全被判成 weak 强制核显。
+    下界只能证明「电源 ≥ 这么多」，永远证明不了「弱」——电池充电功率大
+    就能把下界抬得很高。只有放电标定的 firm 值才配定档。
+    """
+    print("== 充电下界不定档：未标定一律 unknown（策略中性） ==")
+    pd = PdBudget(cfg())
+    # 100W 充电器重充场景：整机 37W + 充电 50W → 下界 87，但确认门内估计
+    # 还爬在 63.7，且是下界不是 firm
+    pd.set_supply(63.7, firm=False)
+    ok(pd.tier() == "unknown", "下界 63.7 不是 weak，是未测定", pd.tier())
+    pol = pd.tier_policy()
+    ok(pol.get("force_igpu") is False, "未测定不强制核显", pol)
+    ok(pol.get("machine_budget_w") is None,
+       "未测定不做整机预算（下界算出的预算是假的）", pol)
+    ok(pol.get("gpu_budget_w") is None, "未测定不做 GPU 预算", pol)
+    # 即使下界很高（87，越过 weak+滞回）也不行 —— 它仍是下界
+    pd.set_supply(87.0, firm=False)
+    ok(pd.tier() == "unknown", "下界 87 也一样不定档", pd.tier())
+    # 同一个数，放电标定过（firm）才说话算数
+    pd.set_supply(87.0, firm=True)
+    ok(pd.tier() == "high", "firm 87 → high，独显解锁", pd.tier())
+    # 换源作废：reset_learning 连档位一起清
+    pd.reset_learning()
+    ok(pd.tier() == "unknown", "换源后档位回到未测定", pd.tier())
+    ok(pd.tier_policy().get("force_igpu") is False,
+       "换源后不再强制核显")
+
+
 def main():
     test_classify()
     test_weak_policy()
@@ -258,6 +289,7 @@ def main():
     test_tier_in_report()
     test_alloc_supply_budget()
     test_tier_hysteresis()
+    test_non_firm_never_weak()
 
 
 if __name__ == "__main__":
