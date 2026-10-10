@@ -6,53 +6,13 @@
 import glob
 import json
 import os
-import re
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _gh_api import repo_slug, request_json, token  # noqa: E402
 
 TAG = os.environ.get("RELEASE_TAG", "v5.0")
-UA = "laptop-power-release"
-
-
-def repo_slug() -> str:
-    """仓库名从 git remote 自动取，别硬编码 —— fork 后脚本要能直接用。"""
-    try:
-        out = subprocess.run(["git", "config", "--get", "remote.origin.url"],
-                             capture_output=True, text=True, timeout=30).stdout or ""
-        m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?\s*$",
-                      out.strip())
-        if m:
-            return "%s/%s" % (m.group(1), m.group(2))
-    except Exception:
-        pass
-    env = os.environ.get("GITHUB_REPO", "")
-    if env:
-        return env
-    raise SystemExit("取不到仓库名：请设 GITHUB_REPO=owner/repo 或配置 git remote origin")
-
-
-def token() -> str:
-    out = subprocess.run(["git", "credential", "fill"],
-                         input="protocol=https\nhost=github.com\n\n",
-                         capture_output=True, text=True, timeout=60).stdout or ""
-    for line in out.splitlines():
-        if line.startswith("password="):
-            return line[len("password="):].strip()
-    return ""
-
-
-def curl(tok, method, url, data=None):
-    cmd = ["curl", "-sS", "-X", method, url,
-           "-H", "Authorization: token " + tok,
-           "-H", "Accept: application/vnd.github+json",
-           "-H", "User-Agent: " + UA,
-           "-H", "Content-Type: application/json",
-           "-w", "\n%{http_code}"]
-    if data is not None:
-        cmd += ["--data-binary", "@-"]
-    r = subprocess.run(cmd, input=data, capture_output=True,
-                       text=True, timeout=180)
-    body, _, code = r.stdout.rpartition("\n")
-    return body.strip(), code.strip()
 
 
 def repo_stats():
@@ -111,22 +71,20 @@ NVML 温度阈值、屏幕**真实存在**的刷新率档位、核显档位、�
     tok = token()
     if not tok:
         raise SystemExit("取不到 GitHub 令牌（git credential fill）")
-    rel, code = curl(tok, "GET",
-                     "https://api.github.com/repos/%s/releases/tags/%s"
-                     % (repo, TAG))
-    if code != "200":
-        raise SystemExit("查 release 失败 HTTP %s: %s" % (code, rel[:200]))
-    rid = json.loads(rel).get("id")
+    base = "https://api.github.com/repos/%s" % repo
+    st, raw = request_json("GET", "%s/releases/tags/%s" % (base, TAG), tok)
+    if st != 200:
+        raise SystemExit("查 release 失败 HTTP %s: %s" % (st, raw[:200]))
+    rid = json.loads(raw.decode("utf-8", "ignore")).get("id")
     if not rid:
         raise SystemExit("release %s 没有 id" % TAG)
 
-    _, code = curl(tok, "PATCH",
-                   "https://api.github.com/repos/%s/releases/%s" % (repo, rid),
-                   data=json.dumps({"body": body}))
-    print("HTTP", code, "| repo", repo, "| %d 文件 / %d 套测试"
+    st, raw = request_json("PATCH", "%s/releases/%s" % (base, rid), tok,
+                           data={"body": body})
+    print("HTTP", st, "| repo", repo, "| %d 文件 / %d 套测试"
           % (n_files, n_tests))
-    if code != "200":
-        raise SystemExit("更新失败")
+    if st != 200:
+        raise SystemExit("更新失败: %s" % raw[:200])
 
 
 if __name__ == "__main__":
