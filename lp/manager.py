@@ -1023,10 +1023,14 @@ class Manager:
                 if self.pdsrc is not None:
                     chg = self.pdsrc.note_ac(ac)
                     if chg == "new":
-                        adopted = self.pdsrc.adopt_on_start()
+                        adopted = self.pdsrc.adopt()
                         self.pd.reset_learning()
                         if adopted is not None:
-                            self.pd.set_supply(adopted, firm=False)
+                            # firm 跟着沿用：上次若被放电精确标定过，这个值就能
+                            # 直接用于提前限帧；只是充电下界则不行（见 pdbudget
+                            # ._over_expected 里的说明）。
+                            self.pd.set_supply(adopted.get("watts"),
+                                               firm=bool(adopted.get("firm")))
                         self._pd_supply_saved = None   # 新会话重新计写入节流
             except Exception:
                 pass
@@ -1055,6 +1059,13 @@ class Manager:
             if req:
                 self._pd_apply(req)
             self._pd_save_supply(now)
+            # 供电档位变了（换了充电器 / 刚测出能力）→ 更新分配器的独显预算，
+            # 让「让渡停止点」跟着这根线的能力走，而不是只认硬件上限。
+            try:
+                self.alloc.set_supply_gpu_budget(
+                    self.pd_tier_policy().get("gpu_budget_w"))
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1339,10 +1350,26 @@ class Manager:
         """
         ge = self.gpu_eco
         ge.enabled = bool(self.cfg.get("gpu_eco_auto", True))
+        # 弱电源（如 65W Type-C）：插电也把独显断掉，改用核显渲染。
+        # 详见 gpueco.tick 的 force_off 说明。
+        force_off = False
         try:
-            ge.tick(bool(st.get("ac")), getattr(self, "current", None))
+            force_off = bool(self.pd_tier_policy().get("force_igpu")) \
+                and bool(st.get("ac"))
         except Exception:
             pass
+        try:
+            ge.tick(bool(st.get("ac")), getattr(self, "current", None),
+                    force_off=force_off)
+        except Exception:
+            pass
+
+    def pd_tier_policy(self) -> dict:
+        """当前供电档位的策略（整机/GPU 预算、是否强制核显）。"""
+        try:
+            return self.pd.tier_policy() or {}
+        except Exception:
+            return {}
 
     def _gpupick_tick(self, st: dict) -> None:
         """核显优先调度（2026-10-10 新增）。
@@ -1373,6 +1400,14 @@ class Manager:
         if getattr(self, "current", None) == "balanced":
             return                      # 系统自带平衡档：一切自动化不干预
         mode, _src, _note, _tier = gp.classify(name)
+        # 弱电源档（插电但供电不足）：不管内置名单怎么判，一律走核显。
+        # 65W 下让独显跑 3D 必然持续从电池取电，比画质下降严重得多。
+        try:
+            if bool(self.pd_tier_policy().get("force_igpu")) \
+                    and bool(st.get("ac")):
+                mode = "igpu"
+        except Exception:
+            pass
         if mode is None:
             return
         path = (fg or {}).get("path", "")

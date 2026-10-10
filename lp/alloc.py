@@ -120,6 +120,7 @@ class PowerAllocator:
         self.cfg = cfg or {}
         self.log_path = log_path
         self._hw_tgp: Optional[float] = None    # hwprofile 运行时学到的独显上限
+        self._supply_gpu_w: Optional[float] = None   # 供电档位给出的独显预算（W）
         self._load_params()
         self._hist: List[dict] = []
         self._last_snap: Dict = {}
@@ -166,7 +167,14 @@ class PowerAllocator:
         # 让渡停止点取物理上限与甜点的较小值 —— 到不了甜点的机器按物理上限停；
         # 能超过甜点的机器则不再做无收益的让渡。
         self.gpu_sweet_w = float(c.get("gpu_sweet_watts", 80))
-        self.gpu_eff_cap = min(self.gpu_tgp_max, self.gpu_sweet_w)
+        # 让渡停止点 = min(硬件上限, 能效甜点, 当前供电能供得起的独显预算)。
+        # 第三项是 2026-10-10 加的：100W Type-C 下整机预算只有 ~77W，若仍按
+        # 硬件上限 70W 让瓦，整机必然超过这根线的可持续能力 → 电池持续倒贴。
+        # 供电充裕（原装适配器）或尚未测定时该项为 None，不加约束。
+        caps = [self.gpu_tgp_max, self.gpu_sweet_w]
+        if self._supply_gpu_w and self._supply_gpu_w > 0:
+            caps.append(self._supply_gpu_w)
+        self.gpu_eff_cap = min(caps)
         if self.gpu_eff_cap <= 0:
             self.gpu_eff_cap = self.gpu_tgp_max
         self.gain_exp = float(c.get("alloc_gain_exponent", 0.35))
@@ -186,6 +194,26 @@ class PowerAllocator:
         if self._hw_tgp and abs(w - self._hw_tgp) < 0.05:
             return
         self._hw_tgp = w
+        self._load_params()
+
+    def set_supply_gpu_budget(self, w) -> None:
+        """喂入当前供电档位算出的独显可用预算（W）。
+
+        来自 pdtier：供电能力 − 安全余量 − 平台开销 − CPU 保底。
+        None / 0 表示不作约束（原装适配器、或还没测出来）。
+        """
+        try:
+            w = float(w) if w else None
+        except Exception:
+            return
+        if w is not None and w <= 0:
+            w = None
+        if self._supply_gpu_w is None and w is None:
+            return
+        if self._supply_gpu_w is not None and w is not None \
+                and abs(w - self._supply_gpu_w) < 0.5:
+            return
+        self._supply_gpu_w = w
         self._load_params()
 
     def reload_cfg(self, cfg: Optional[Dict] = None):

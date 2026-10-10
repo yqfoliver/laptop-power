@@ -139,15 +139,23 @@ class GpuEco:
         return ok
 
     # -------------------------------------------------- 自动化 tick
-    def tick(self, on_ac: bool, active_profile: Optional[str]) -> None:
-        """由 manager 巡检调用。幂等：目标没变就只读一次。"""
+    def tick(self, on_ac: bool, active_profile: Optional[str],
+             force_off: bool = False) -> None:
+        """由 manager 巡检调用。幂等：目标没变就只读一次。
+
+        force_off：供电不足（弱电源档）时，**插电也要把独显断掉**。
+        65W 充电器到系统只有 ~58W，扣掉平台开销后剩 46W 喂不饱独显
+        （最低也要 35W 起，加上 CPU 必然超支）。这种情况下正确解法不是
+        压功耗到勉强不放电，而是换渲染路径 —— 核显渲染整机功耗大幅下降，
+        省下的预算还能给电池充电。
+        """
         if not self.enabled:
             if self._applied == 1:
                 self.set(0)          # 用户关了功能 → 还原独显
             return
         if active_profile == "balanced":
             return                    # 系统平衡档：一切自动化都不干预
-        if on_ac:
+        if on_ac and not force_off:
             # 插电：独显必须可用。不管 eco 是谁关的（GHelper/上一次会话），
             # 只要当前是断电状态就还原；初始状态记一笔"已确认可用"。
             if self.read() == 1:
@@ -156,7 +164,12 @@ class GpuEco:
                 self._applied = 0
             return
         # 离电：游戏档不断电（离电也可手动跑游戏）
-        want = 0 if active_profile == "gaming" else 1
+        # 插电但供电不足（force_off）：一律断电，游戏档也不例外 ——
+        # 那种供电下开独显只会让电池持续放电，比降画质严重得多。
+        if on_ac:
+            want = 1
+        else:
+            want = 0 if active_profile == "gaming" else 1
         cur = self.read()
         if cur is not None and cur == want:
             self._applied = want

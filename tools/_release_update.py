@@ -5,10 +5,29 @@ HTTP 一律走 curl（沙箱里 urllib 的 TLS 握手会被拦）。
 """
 import json
 import os
+import re
 import subprocess
 import sys
 
-REPO = "yqfoliver/laptop-power"
+
+def repo_slug() -> str:
+    """仓库名从 git remote 自动取，别硬编码 —— 别人 fork 后脚本要能直接用。"""
+    try:
+        out = subprocess.run(["git", "config", "--get", "remote.origin.url"],
+                             capture_output=True, text=True, timeout=30).stdout or ""
+        m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?\s*$",
+                      out.strip())
+        if m:
+            return "%s/%s" % (m.group(1), m.group(2))
+    except Exception:
+        pass
+    env = os.environ.get("GITHUB_REPO", "")
+    if env:
+        return env
+    sys.exit("取不到仓库名：请设 GITHUB_REPO=owner/repo 或配置 git remote origin")
+
+
+REPO = repo_slug()
 TAG = "v5.0"
 ASSET_NAME = "LaptopPowerAuto.exe"
 SRC = os.path.join("dist", "笔记本电源自适应.exe")

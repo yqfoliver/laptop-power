@@ -371,10 +371,15 @@ function renderBatt(){
   }else if(pd.supply_w!=null && state.ac){
     // 没在压制但已经学到电源上限：告诉用户离供电天花板还有多少余量
     // 整机功耗在「游戏功耗分配」卡里已有，这里只报上限和余量，避免重复
-    let t = "Type-C 供电 · 上限 " + w0(pd.supply_w) + " W · 余量 " +
+    // 供电档位：65W 与 100W 的策略完全不同，必须让用户知道当前按哪一档在管
+    const TIER_SHORT = {weak:"弱电源", mid:"中等供电", high:"强供电",
+                        wall:"原装适配器", unknown:"测定中"};
+    let t = (TIER_SHORT[pd.tier] || "Type-C") + " · 上限 " +
+            w0(pd.supply_w) + " W · 余量 " +
             w0(pd.supply_w - (pd.machine_w||0)) + " W";
     if(pd.supply_src) t += "（" + pd.supply_src + "）";
-    if(pd.supply_w - (pd.machine_w||0) < 8) t += "\n余量吃紧，即将自动限帧保电池";
+    if(pd.force_igpu) t += "\n供电喂不饱独显，已切核显渲染（省下的电还能充电）";
+    else if(pd.supply_w - (pd.machine_w||0) < 8) t += "\n余量吃紧，即将自动限帧保电池";
     advText = t;
   }else if(care.enabled && care.advice && care.advice.length){
     advText = "电池养护：" + care.advice[0];

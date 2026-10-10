@@ -21,7 +21,10 @@ cmd = [
     # 面板路由里的模块是函数内动态 import，静态分析不一定抓得到，显式声明
     "--hidden-import", "lp.checkup",
     "--hidden-import", "lp.autostart_task",   # 自启加固（main.py 里函数内 import）
-    "--hidden-import", "lp.hwprofile",        # 硬件自适应（manager 里函数内 import）
+    "--hidden-import", "lp.hwprofile",
+    # pdtier 在 pdbudget/alloc 里是函数内动态 import，静态分析扫不到；
+    # 漏了它不会报错，只会让档位策略静默退化成兜底值 —— 必须显式带上。
+    "--hidden-import", "lp.pdtier",        # 硬件自适应（manager 里函数内 import）
     "--hidden-import", "lp.gpupick",          # 核显优先调度（同上）
     "--clean", "-y",
     "main.py",

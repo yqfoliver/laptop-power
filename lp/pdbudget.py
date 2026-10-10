@@ -80,6 +80,16 @@ SUPPLY_DN_JUMP_W = 40.0     # 确认后的单拍最大下修幅度
 SUPPLY_DN_EPS_W = 1.5       # 小于这个差距不算「要下修」
 SUPPLY_DN_EWMA = 0.6        # 确认后的收敛权重（越大越快）
 
+# 供电档位中文名（面板显示）。弱/中/强三档的策略差异见 pdtier 模块。
+try:
+    from .pdtier import TIER_CN as TIER_CN_LABEL
+except Exception:            # pragma: no cover —— 同包模块，理论上不会失败
+    TIER_CN_LABEL = {}
+
+# 脱离 weak 档所需的额外余量（W）。65W PD 实到 ~58W，离阈值只有 7W，
+# 没有这道缓冲，估计值一抖就会让独显反复通断。
+TIER_UP_HYST_W = 8.0
+
 
 class PdBudget:
     """纯决策器：只算「该做什么」，动作由 manager 执行（便于注入测试）。"""
@@ -102,6 +112,7 @@ class PdBudget:
         self.stuck = False           # 手段用尽仍在放电
         self._lb_streak = 0          # 充电下界连续超限计数（抬升确认用）
         self._dn_streak = 0          # 放电上界连续偏低计数（下修确认用）
+        self._tier: Optional[str] = None   # 上一轮档位（滞回用）
         self._src = "未知"           # 上限的来源标签（面板显示）
         self.reload_cfg(cfg)
 
@@ -181,13 +192,70 @@ class PdBudget:
         if self.supply_w is not None:
             self.supply_w = max(SUPPLY_MIN_W, min(SUPPLY_MAX_W, self.supply_w))
 
+    # ------------------------------------------------------------ 供电档位
+    def tier(self) -> str:
+        """当前供电能力落在哪一档（weak / mid / high / wall / unknown）。
+
+        带**不对称滞回**：脱离 weak 要额外确认，掉回 weak 立刻生效。
+        理由和供电上限学习的棘轮一样 —— 两个方向的代价完全不同：
+          · 往上抬错了 = 把独显打开 = 电池开始放电（事故）
+          · 往下掉慢了 = 电池正在放电还多放一会儿（事故）
+        所以往上要迟钝、往下要敏感。65W PD 实到 ~58W，离 65W 阈值只有 7W
+        余量，没有滞回的话估计值一抖就会让独显反复通断。
+        """
+        try:
+            from . import pdtier
+        except Exception:
+            return "unknown"
+        raw = pdtier.classify(self.supply_w)
+        if self._tier == "weak" and raw not in ("weak", "unknown"):
+            w = self.supply_w
+            if w is None or w < pdtier.WEAK_MAX_W + TIER_UP_HYST_W:
+                return "weak"      # 还不够格开独显，先按弱电源管着
+        self._tier = raw
+        return raw
+
+    def tier_policy(self) -> dict:
+        """该档位的策略（整机预算 / GPU 预算 / 是否强制核显 …）。"""
+        try:
+            from . import pdtier
+            return pdtier.policy(
+                self.tier(), self.supply_w,
+                overhead_w=self._k("pd_overhead_w", 12.0))
+        except Exception:
+            return {"tier": "unknown", "force_igpu": False,
+                    "allow_dgpu": True, "disable_guard": False,
+                    "pre_margin_w": self._k("pd_pre_margin_w", 8.0),
+                    "machine_budget_w": None, "gpu_budget_w": None}
+
+    def tier_advice(self) -> str:
+        """给用户看的一句话策略说明。"""
+        try:
+            from . import pdtier
+            pol = self.tier_policy()
+            return pdtier.advice(pol.get("tier", "unknown"), pol)
+        except Exception:
+            return ""
+
     def _over_expected(self) -> bool:
         """预判：整机功耗是否已逼近学到的电源上限"""
         if not self._k("pd_predict_enabled", True):
             return False
         if self.supply_w is None or self.machine_w is None:
             return False
-        margin = self._k("pd_pre_margin_w", 8.0)
+        # 关键（2026-10-10 修复）：充电状态下推出来的只是**下界**
+        # （「电源至少供得出这么多」），不是上限。电池充电功率受自身充电曲线
+        # 限制，轻载时永远在充电 ⇒ 下界永远停在很低的位置。拿它当上限做预判，
+        # 会在 65W 充电器上把 34W 的日常办公判成「逼近上限」→ 限帧、降刷新率，
+        # 纯误伤。只有放电事件标定的值（supply_firm）才是真上限，才配做预判。
+        if not self.supply_firm:
+            return False
+        pol = self.tier_policy()
+        # 原装适配器（≥120W）：余量本来就够，不预判。它的整机峰值本就可能
+        # 摸到预判线，判「快供不上了」纯属误报。
+        if pol.get("disable_guard"):
+            return False
+        margin = pol.get("pre_margin_w") or self._k("pd_pre_margin_w", 8.0)
         return self.machine_w >= (self.supply_w - margin)
 
     # ------------------------------------------------------------ 配置
@@ -195,7 +263,9 @@ class PdBudget:
         if cfg is not None:
             self.cfg = cfg
         self.enabled = bool(self.cfg.get("pd_guard_enabled", True))
-        # 上次运行学到的电源上限（config 里持久化），冷启动即可预判
+        # 上次运行学到的电源上限（config 里持久化），冷启动即可预判。
+        # 现在正常路径下这里是 None（改由 pd_supply.json 按供电会话存档），
+        # 只有用户手填才会命中 —— 手填视为可信的精确值，故 firm=True。
         if self.supply_w is None:
             try:
                 v = self.cfg.get("pd_supply_w")
@@ -203,6 +273,7 @@ class PdBudget:
                     v = float(v)
                     if SUPPLY_MIN_W <= v <= SUPPLY_MAX_W:
                         self.supply_w = v
+                        self.supply_firm = True
             except Exception:
                 self.supply_w = None
 
@@ -224,6 +295,7 @@ class PdBudget:
         self.ok_s = 0.0
         self._lb_streak = 0
         self._dn_streak = 0
+        self._tier = None           # 换了充电器，档位重新判定（不受滞回影响）
         self._src = "本次供电会话：学习中"
         # 注意：不清 stage —— 压制动作由 manager 自己在 AC 断开时还原
 
@@ -373,6 +445,9 @@ class PdBudget:
     def _escalate(self) -> dict:
         self.stage = min(MAX_STAGE, self.stage + 1)
         self.ok_s = 0.0          # 刚加深压制，达标计时从头开始
+        # 一旦真的动手，预判态就结束了 —— 否则面板会一直挂着「预判中」，
+        # 而实际上已经在压制。触发来源改由 predict_armed 记录。
+        self.predicted = False
         req: Dict[str, Any] = {"stage": self.stage}
         if self.stage == 1:
             if self._k("pd_low_hz", True):
@@ -448,6 +523,13 @@ class PdBudget:
             "supply_w": (round(self.supply_w, 1) if self.supply_w is not None else None),
             "supply_firm": self.supply_firm,
             "supply_src": (self._src if self.supply_w is not None else "本次供电会话：学习中"),
+            "tier": self.tier(),
+            "tier_cn": TIER_CN_LABEL.get(self.tier(), self.tier()),
+            "gpu_budget_w": self.tier_policy().get("gpu_budget_w"),
+            "machine_budget_w": self.tier_policy().get("machine_budget_w"),
+            "force_igpu": bool(self.tier_policy().get("force_igpu")),
+            "allow_dgpu": bool(self.tier_policy().get("allow_dgpu")),
+            "tier_advice": self.tier_advice(),
             "predicted": self.predicted,
             "predict_armed": self.predict_armed,
             "stuck": self.stuck,

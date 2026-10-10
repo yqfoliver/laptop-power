@@ -151,6 +151,17 @@ class PdSource:
         只有「上次记录离现在很近」才沿用 —— 间隔一长就说明程序/机器离开过，
         期间很可能换过充电器，拿旧数字当真值正是旧实现的事故成因。
         """
+        a = self.adopt()
+        return None if a is None else a["watts"]
+
+    def adopt(self) -> Optional[Dict[str, Any]]:
+        """同上，但连 `firm` 一起返回。
+
+        firm 必须跟着走：上次会话若被放电事件精确标定过（firm=True），这个值
+        就是真上限，冷启动后可以直接拿来做「提前限帧」判据；若只是充电下界
+        （firm=False），它只能证明「电源至少这么大」，拿它做预判会在弱电源上
+        把日常轻载误判成快供不上 → 限帧降刷，纯误伤。
+        """
         cur = self.state.get("current")
         if not cur:
             return None
@@ -165,7 +176,7 @@ class PdSource:
             return None
         self.adopted = True
         # 沿用也要重新确认：交给放电/充电分支继续修正
-        return w
+        return {"watts": w, "firm": bool(cur.get("firm"))}
 
     def save(self, watts: Optional[float], firm: bool = False) -> None:
         """记录本次会话实测到的供电能力（限频由调用方控制）。"""
