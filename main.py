@@ -77,6 +77,24 @@ def main(argv=None) -> int:
                 print("    ", r["note"])
         return 0
 
+    if "--hw" in argv:
+        # 打印本机硬件自适应档案（只读探测，不写电源计划、不改注册表）
+        from lp import hwprofile as _hw
+        from lp.nvmlctl import Nvml
+        from lp.display import DisplayCtl
+        s = _hw.ensure(cfg, nvml=Nvml(), display=DisplayCtl()).summary()
+        print("硬件自适应档案（本机现测，结果不随源码分发）：")
+        for k, label in (("dgpu_name", "独显"), ("igpu_name", "核显"),
+                         ("atkacpi_ok", "厂商通道"), ("hz", "当前刷新率"),
+                         ("available_hz", "可用刷新率"),
+                         ("gpu_tgp_max_w", "独显上限(W)"),
+                         ("gpu_temp_limit_c", "独显温度线(℃)"),
+                         ("dc_refresh_hz", "离电降刷"),
+                         ("gpu_peak_w", "实测峰值(W)")):
+            print("  %-14s %s" % (label, s.get(k)))
+        print("  取值来源     %s" % ("、".join(s.get("sources") or []) or "通用兜底"))
+        return 0
+
     if "--selftest" in argv:
         print("管理员权限：%s" % diagnose.is_admin())
         print("系统计划：%s" % pc.list_schemes())

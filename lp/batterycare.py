@@ -545,11 +545,11 @@ if __name__ == "__main__":  # pragma: no cover
     care = BatteryCare({"care_heat_relief": False}, p)   # 演示不做任何 powercfg 写入
     seq = [
         (dict(ac=True, charging=True, discharging=False, percent=97,
-              rate_w=-40.0, full_mwh=60536), 90.0, 3600.0),        # 满充+充电高热
+              rate_w=-40.0, full_mwh=50000), 90.0, 3600.0),        # 满充+充电高热
         (dict(ac=True, charging=False, discharging=False, percent=100,
-              rate_w=None, full_mwh=60536), 78.0, 7200.0),         # 满充搁置
+              rate_w=None, full_mwh=50000), 78.0, 7200.0),         # 满充搁置
         (dict(ac=False, charging=False, discharging=True, percent=12,
-              rate_w=21.0, full_mwh=60536), 60.0, 1800.0),         # 深放
+              rate_w=21.0, full_mwh=50000), 60.0, 1800.0),         # 深放
     ]
     for batt, heat, dt in seq:
         r = care.feed(batt, heat, dt)

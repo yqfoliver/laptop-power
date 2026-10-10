@@ -92,6 +92,25 @@ class Manager:
         self.bat = BatteryMonitor()
         self.disp = DisplayCtl()
         self.bright = BrightnessCtl()
+        # 硬件自适应档案（2026-10-10）：源码里不带任何一台机器的标定数字，
+        # 第一次启动（或档案超过 7 天）在**本机**现测一次 —— 独显有无/功耗上限/
+        # 温度线/屏幕刷新率档位/厂商通道，并把结果填进 config 的自动位（None）。
+        # 游戏档还会按实测到的独显功耗峰值持续修正「让渡停止点」。
+        self.hwprof = None
+        try:
+            from . import hwprofile
+            self.hwprof = hwprofile.ensure(cfg, nvml=self.nvml, display=self.disp)
+            if getattr(self.hwprof, "last_filled", None):
+                try:
+                    config.save(cfg)
+                except Exception:
+                    pass
+            if self.hwprof is not None:
+                self.alloc.set_hw_tgp(self.hwprof.gpu_tgp_max())
+                # 高端机的功耗真值别被通用钳制当成坏值丢掉
+                self.pmon.set_watt_limits(self.hwprof.watt_limits())
+        except Exception:
+            pass
         # 充放电管理：满充搁置/高温充电/深放统计 + 充电高热时临时降温
         self.care = BatteryCare(cfg, data_path=os.path.join(APP_ROOT, "battery_care.json"),
                                 scheme_guid=cfg.get("custom_scheme") or None)
@@ -649,6 +668,7 @@ class Manager:
             "thermal_hw_line": self.thermal.hw_line(),
             "thermal_note": self._thermal_note,
             "fan": hw.fan_status(),
+            "hw": self.hw_report(),
             "clamshell": self.clamshell_report(),
             "pd": self.pd_report(),
             "pd_line": self.pd.line(),
@@ -810,6 +830,15 @@ class Manager:
             return
         self.last_power = snap
         self._power_at = time.time()
+        # 硬件自适应：游戏档插电时把独显实测功耗喂给峰值学习器。
+        # 这样「让渡停止点」不用猜 —— 第一局游戏内就能从通用兜底 60W 抬到真值。
+        try:
+            gw = snap.get("gpu_w")
+            if gw and on_ac and self.current == "gaming" and self.hwprof is not None:
+                self.hwprof.learn_gpu_peak(gw)
+                self.alloc.set_hw_tgp(self.hwprof.gpu_tgp_max())
+        except Exception:
+            pass
         # 离电时把电池放电功率喂给分配器当整机真值（面板「整机」与电池卡一致）；
         # 插电时没有真值通道，仍用 soc+独显+固定开销
         if not on_ac:
@@ -874,6 +903,22 @@ class Manager:
             self.gpupick.reload_cfg(self.cfg)
         except Exception:
             pass
+        # 面板改完参数后，把「自动位」（用户没填的键）按硬件档案补一遍
+        try:
+            if self.hwprof is not None:
+                self.hwprof.apply(self.cfg)
+                self.alloc.set_hw_tgp(self.hwprof.gpu_tgp_max())
+        except Exception:
+            pass
+
+    def hw_report(self) -> dict:
+        """硬件自适应档案摘要：让人一眼看出「这些判据是按我的机器测出来的」"""
+        try:
+            if self.hwprof is not None:
+                return self.hwprof.summary()
+        except Exception:
+            pass
+        return {}
 
     def alloc_report(self) -> dict:
         r = self.alloc.report or {}

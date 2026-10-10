@@ -16,9 +16,9 @@
   BATTERY_STATUS.Rate(mW)                                     -> 实时充/放电功率（放电为正）
   => 再配上满充容量就能算：剩余电量 %、按当前功率还能撑多久
 
-本机实测（2026-10-04）：
-  设计容量 73000 mWh，满充容量 60536 mWh -> 健康度 82.9%
-  插电满充时 PowerState=0x1（AC 在线）、Rate=0 mW
+读数示例（不同机器差别很大，程序一律现读现算，不预置任何容量）：
+  设计容量 / 满充容量 都从 ACPI 读，健康度 = 满充 ÷ 设计；
+  插电满充时能读到 PowerState 含 AC 在线、Rate=0 mW。
 """
 from __future__ import annotations
 

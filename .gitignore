@@ -8,6 +8,10 @@ learn.json.bak
 learn.json.old
 battery_care.json
 clamshell.json
+hwprofile.json
+hwprofile.json.tmp
+gpupick.json
+gpupick.json.tmp
 battery_report.xml
 面板地址.txt
 run.txt

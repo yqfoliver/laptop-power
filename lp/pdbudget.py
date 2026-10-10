@@ -306,7 +306,10 @@ class PdBudget:
         req: Dict[str, Any] = {"stage": self.stage}
         if self.stage == 1:
             if self._k("pd_low_hz", True):
-                req["refresh"] = int(self._k("pd_low_hz_value", 60))
+                # 0/None = 这台机器没有更低的刷新率档（60Hz 屏），别白折腾
+                hz = int(self._k("pd_low_hz_value", 0) or 0)
+                if hz > 0:
+                    req["refresh"] = hz
             if self._over_expected():
                 self.note = ("整机 %.0fW 已逼近电源上限 %.0fW：提前限帧，"
                              "电池不必补电" % (self.machine_w or 0.0,

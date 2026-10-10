@@ -529,11 +529,13 @@ def detect_igpu_tier() -> int:
     """按核显型号猜一个初始档位：3=高性能核显，2=中端，1=入门。"""
     try:
         import subprocess
+        # 必须 CREATE_NO_WINDOW：GUI 进程起子进程会新建控制台窗口（黑窗一闪）
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "(Get-CimInstance Win32_VideoController).Name"],
             capture_output=True, text=True, encoding="utf-8",
-            errors="ignore", timeout=20).stdout.lower()
+            errors="ignore", timeout=20, creationflags=flags).stdout.lower()
     except Exception:
         return 2
     strong = ("radeon(tm) 8", "radeon 8", "radeon(tm) 7", "radeon 7",

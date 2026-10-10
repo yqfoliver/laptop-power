@@ -119,6 +119,7 @@ class PowerAllocator:
     def __init__(self, cfg: Dict, log_path: Optional[str] = None):
         self.cfg = cfg or {}
         self.log_path = log_path
+        self._hw_tgp: Optional[float] = None    # hwprofile 运行时学到的独显上限
         self._load_params()
         self._hist: List[dict] = []
         self._last_snap: Dict = {}
@@ -146,9 +147,11 @@ class PowerAllocator:
         self.floor_pct = int(c.get("alloc_min_cpu_pct", 45))
         self.step_pct = int(c.get("alloc_step_pct", 5))
         self.cooldown = float(c.get("alloc_cooldown_seconds", 30))
-        self.cpu_temp_limit = float(c.get("cpu_temp_limit_c", 96))
-        self.gpu_temp_limit = float(c.get("gpu_temp_limit_c", 88))
-        self.envelope_w = float(c.get("power_envelope_watts", 110))
+        # 温度/包络默认取通用保守值；hwprofile 会在启动时把「本机实测值」
+        # 填进 config 的自动位（用户手设过的数字优先）。
+        self.cpu_temp_limit = float(c.get("cpu_temp_limit_c") or 95)
+        self.gpu_temp_limit = float(c.get("gpu_temp_limit_c") or 87)
+        self.envelope_w = float(c.get("power_envelope_watts") or 100)
         self.overhead_w = float(c.get("board_overhead_watts", 12))
         # 离电时的整机功耗真值（电池放电功率），由 manager 每轮喂入。
         # 固定 12W 开销是按游戏负载（风扇全速）标定的，待机时实际平台开销
@@ -156,16 +159,34 @@ class PowerAllocator:
         # vs 电池真值 8.9W）。离电时电池放电就是整机功耗，直接采用。
         self.dc_true_w = None
         self._on_ac = True
-        self.gpu_tgp_max = float(c.get("gpu_tgp_max_watts", 70))
+        # 独显上限：用户手设 > hwprofile 运行时学到的实测峰值 > 通用兜底 60W。
+        # 兜底宁小勿大（写大会让「已到顶」判据永远触发不了 → 一直白压 CPU）。
+        self.gpu_tgp_max = float(c.get("gpu_tgp_max_watts") or self._hw_tgp or 60)
         # 能效甜点：越过这个功耗后，每瓦换到的帧数急剧衰减（极客湾曲线拐点 ~80W）。
-        # 让渡停止点取物理上限与甜点的较小值 —— 到不了甜点的机器（如本机 ~70W）
-        # 按物理上限停；能超过甜点的机器则不再做无收益的让渡。
+        # 让渡停止点取物理上限与甜点的较小值 —— 到不了甜点的机器按物理上限停；
+        # 能超过甜点的机器则不再做无收益的让渡。
         self.gpu_sweet_w = float(c.get("gpu_sweet_watts", 80))
         self.gpu_eff_cap = min(self.gpu_tgp_max, self.gpu_sweet_w)
         if self.gpu_eff_cap <= 0:
             self.gpu_eff_cap = self.gpu_tgp_max
         self.gain_exp = float(c.get("alloc_gain_exponent", 0.35))
         self.verbose = bool(c.get("alloc_log_csv", True))
+
+    def set_hw_tgp(self, w) -> None:
+        """喂入 hwprofile 运行时学到的独显功耗上限（W）。
+
+        只在值真的变了才重载参数（避免每轮巡检重算一遍）。
+        """
+        try:
+            w = float(w) if w else None
+        except Exception:
+            return
+        if not w:
+            return
+        if self._hw_tgp and abs(w - self._hw_tgp) < 0.05:
+            return
+        self._hw_tgp = w
+        self._load_params()
 
     def reload_cfg(self, cfg: Optional[Dict] = None):
         """面板保存设置后调用：立即生效，不用重启程序"""

@@ -21,6 +21,8 @@ cmd = [
     # 面板路由里的模块是函数内动态 import，静态分析不一定抓得到，显式声明
     "--hidden-import", "lp.checkup",
     "--hidden-import", "lp.autostart_task",   # 自启加固（main.py 里函数内 import）
+    "--hidden-import", "lp.hwprofile",        # 硬件自适应（manager 里函数内 import）
+    "--hidden-import", "lp.gpupick",          # 核显优先调度（同上）
     "--clean", "-y",
     "main.py",
 ]

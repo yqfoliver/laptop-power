@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ctypes
 import time
+from typing import Optional
 from ctypes import wintypes, POINTER, byref, c_void_p, c_double, c_uint32, Structure
 
 # ------------------------------------------------------------------ PDH 绑定
@@ -105,14 +106,17 @@ def _sane(v, hi, lo=0.0):
     return v
 
 
-# 各通路的物理上限（W），按本机规格留足余量
+# 各通路的物理上限（W）：**通用兜底**，实际按本机 CPU 规模 / 独显档次放宽
+# （见 PowerMonitor.set_watt_limits 与 lp/hwprofile.watt_limits）。
+# 写死一台机器的规格会误杀：高端笔记本独显能到 175W，140W 的钳制会把真值
+# 全当成坏值丢掉，面板就永远读不到独显功耗。
 _W_LIMITS = {
-    "cpu_w": 120,      # CPU 实测满载 42~47W
-    "igpu_w": 80,      # 核显 890M
+    "cpu_w": 120,
+    "igpu_w": 80,
     "npu_w": 60,
     "soc_w": 150,      # SoC 总和（含上面所有）
     "system_w": 250,
-    "gpu_w": 140,      # 独显 TGP 100W + Dynamic Boost 余量
+    "gpu_w": 140,
 }
 
 
@@ -126,6 +130,7 @@ class PowerMonitor:
         self._c = {}
         self._err = ""
         self._proc_freq_nominal = None
+        self._wlim = dict(_W_LIMITS)     # 读数合理性钳制，可按本机硬件放宽
         # CPU 温度备份源（见 set_temp_backup）。缺省 None = 不启用。
         self._temp_backup = None
         self._cross_check_every = 180.0   # 交叉校验间隔秒；0 = 关闭校验
@@ -154,6 +159,18 @@ class PowerMonitor:
             self.available = True
         except Exception as e:
             self._err = str(e)
+
+    def set_watt_limits(self, limits: Optional[dict] = None) -> None:
+        """按本机硬件放宽读数钳制上限（高端机别把真值当坏值丢掉）"""
+        if not limits:
+            return
+        for k, v in limits.items():
+            try:
+                v = float(v)
+            except Exception:
+                continue
+            if v > 0:
+                self._wlim[k] = max(float(self._wlim.get(k, v)), v)
 
     def close(self):
         try:
@@ -279,15 +296,15 @@ class PowerMonitor:
         em = self._read(C_ENERGY)
         if em:
             sock = self._pick(em, "Socket Power", "Apu Power")
-            out["soc_w"] = None if sock is None else _sane(sock / 1000.0, _W_LIMITS["soc_w"])
+            out["soc_w"] = None if sock is None else _sane(sock / 1000.0, self._wlim["soc_w"])
             v = self._pick(em, "CPU Power")
-            out["cpu_w"] = None if v is None else _sane(v / 1000.0, _W_LIMITS["cpu_w"])
+            out["cpu_w"] = None if v is None else _sane(v / 1000.0, self._wlim["cpu_w"])
             v = self._pick(em, "GPU Power")
-            out["igpu_w"] = None if v is None else _sane(v / 1000.0, _W_LIMITS["igpu_w"])
+            out["igpu_w"] = None if v is None else _sane(v / 1000.0, self._wlim["igpu_w"])
             v = self._pick(em, "NPU Power")
-            out["npu_w"] = None if v is None else _sane(v / 1000.0, _W_LIMITS["npu_w"])
+            out["npu_w"] = None if v is None else _sane(v / 1000.0, self._wlim["npu_w"])
             v = self._pick(em, "System Power")
-            out["system_w"] = None if v is None else _sane(v / 1000.0, _W_LIMITS["system_w"])
+            out["system_w"] = None if v is None else _sane(v / 1000.0, self._wlim["system_w"])
 
         tz = self._read(C_TZ)
         tz_val = _norm_temp(tz[0][1]) if tz else None
@@ -359,7 +376,7 @@ class PowerMonitor:
         n = self.nvml
         if want_gpu and n is not None and getattr(n, "ready", False):
             out["gpu_temp"] = n.temperature()
-            out["gpu_w"] = _sane(n.power_usage(), _W_LIMITS["gpu_w"])
+            out["gpu_w"] = _sane(n.power_usage(), self._wlim["gpu_w"])
             u = n.utilization()
             out["gpu_util"] = None if u is None else max(0.0, min(100.0, float(u)))
             out["gpu_clock"] = n.clock_sm()

@@ -63,7 +63,7 @@ def fresh(cfg=None, pc=None, path=None, chg=None):
 
 
 def batt(ac=True, charging=False, discharging=False, pct=50, rate=None,
-         full=60536):
+         full=50000):
     return {"ac": ac, "charging": charging, "discharging": discharging,
             "percent": pct, "rate_w": rate, "full_mwh": full}
 

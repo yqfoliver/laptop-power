@@ -52,22 +52,23 @@ DEFAULT_CONFIG = {
     "last_profile": "balanced",
 
     # ---------------- 游戏档 CPU/GPU 功耗分配（2026-10-04 新增） ----------------
-    # 本机实测：独显功耗墙不可软件设定，唯一控制杆是 CPU 侧；
+    # 独显功耗墙通常不可软件设定（vBIOS 锁死），唯一控制杆是 CPU 侧；
     # 压低 CPU 上限 -> Dynamic Boost 把省下的瓦数转给独显 -> 帧数上升。
+    #
+    # 【通用性约定】下面标 "自动" 的键默认留 None，由 lp/hwprofile.py 在**本机**
+    # 现测后填入（并随实测峰值持续修正）。仓库里绝不放某一台开发机的标定数字
+    # —— 那正是「独显上限写大了 → 到顶判据永远触发不了 → 一直白压 CPU」的成因。
+    # 用户手设过的数字永远优先于自动值（自动只填 None 位）。
     "alloc_enabled": True,
-    "power_envelope_watts": 110,      # 整机 CPU+GPU 持续功耗上限（ASUS Turbo 模式口径）
-    # 独显最大总功耗：2026-10-06 按本机实测重新标定（原写 100W，与硬件不符）
-    #   ATKACPI gpu_power_base = 55W，Dynamic Boost 实测再加 ~14W；
-    #   power_alloc.csv 228 条真实游戏采样：峰值 68.8W / 均值 59.8W。
-    #   原值 100W 会让「已到顶停止让渡」(0.97*100=97W) 永远触发不了。
-    "gpu_tgp_max_watts": 70,          # 独显实际功耗上限（实测峰值 68.8W + 余量）
-    # 能效甜点（借鉴极客湾 Geekerwan 功耗-性能曲线 + 超能网实测）：
-    #   4060 移动版在 ~80W 之后性能收益曲线变得非常平缓
-    #   （80W→100W 约 +6%，100W→110W 仅 +1%）。超过甜点后继续让瓦换不到帧数。
-    "gpu_sweet_watts": 80,            # 让渡停止点 = min(物理上限, 甜点)
-    "board_overhead_watts": 12,       # 主板/屏幕/风扇等固定开销
-    "cpu_temp_limit_c": 96,           # CPU 温度上限（实测满载平台期 ~93℃）
-    "gpu_temp_limit_c": 88,           # 独显温度上限（驱动 slowdown 阈值实测 91℃）
+    "power_envelope_watts": None,     # 整机 CPU+GPU 持续包络（仅展示用）：自动
+    "gpu_tgp_max_watts": None,        # 独显实际功耗上限：自动（游戏档实测峰值学习）
+    # 能效甜点：越过这个功耗后，每瓦换到的帧数急剧衰减，继续让瓦不划算
+    # （来源：极客湾 Geekerwan 功耗-性能曲线，并与多家实测数据互相印证：
+    #   45W→80W 约 +28%，80W→105W 仅 +3.7%。拐点在 ~80W，取它做通用默认值。）
+    "gpu_sweet_watts": 80,            # 让渡停止点 = min(自动上限, 甜点)
+    "board_overhead_watts": 12,       # SoC+独显之外的平台开销（屏幕/风扇/VRM）
+    "cpu_temp_limit_c": 95,           # CPU 温度上限（通用保守值，可手改）
+    "gpu_temp_limit_c": None,         # 独显温度上限：自动（NVML slowdown 阈值 -4℃）
     "alloc_min_cpu_pct": 45,          # 让渡 CPU 时「最大处理器状态」的下限
     "alloc_step_pct": 5,              # 每次调整步长（%）
     "alloc_cooldown_seconds": 30,     # 两次调整最小间隔（秒）
@@ -75,12 +76,14 @@ DEFAULT_CONFIG = {
     "alloc_log_csv": True,            # 游戏档采样写入 power_alloc.csv
 
     # ---------------- 离电续航（2026-10-04 新增） ----------------
-    # 本机离电时跑的是 AMD Radeon 890M 核显，独显处于休眠，
-    # 剩下的耗电大头只有两个：SoC（CPU+核显）与屏幕。所以离电策略围绕这两件事做。
+    # 离电时独显通常休眠，剩下的耗电大头只有两个：SoC（CPU+核显）与屏幕。
+    # 所以离电策略围绕这两件事做；**机器不同，收益也不同**，别照搬任何数字。
     "battery_eco_percent": 35,        # 【当前无效】低电量进续航档阈值；离电一律续航档已完全覆盖它，代码中未读取
     "battery_saver_percent": 15,      # 拔电且低于此电量：进「极限续航」档
-    "refresh_on_battery": True,       # 拔电时降低屏幕刷新率（本机 165Hz -> 60Hz）
-    "dc_refresh_hz": 60,              # 拔电时用的刷新率（0 = 不改）
+    "refresh_on_battery": True,       # 拔电时降低屏幕刷新率
+    # 拔电用的刷新率：None=自动挑「本机真实存在的、比当前低的最高档」
+    # （绝不硬写面板不支持的频率 —— 那会黑屏；60Hz 屏的机器自动得到 None=不改）
+    "dc_refresh_hz": None,
     "battery_eta": True,              # 面板显示实时放电功率与预计剩余时间
     "dc_brightness_cap": 45,          # 拔电时亮度封顶（%）。屏幕是离电第一耗电大户
                                       # （占 20~50%，100→50 可省 20~30% 续航）；0 = 不封顶
@@ -130,13 +133,13 @@ DEFAULT_CONFIG = {
     #     逐级压制到电池不再出力，避免电池高温大电流放电加速老化
     "pd_guard_enabled": True,
     "pd_margin_w": 1.5,        # 放电超过此值才算「电池在补电」
-    # 12s（原 25s）：实测 Type-C 下整机 82W、电源上限约 89W，一旦超供电就是
-    # 10~20W 级的大电流放电，晚 25 秒反应 = 多放 0.1Wh 高温电。12 秒既能滤掉
-    # 切场景的瞬时尖峰，又不会让电池长时间补电。
+    # 12s（原 25s）：弱电源上一超供电就是 10~20W 级的大电流放电，
+    # 晚 25 秒反应 = 多放 0.1Wh 高温电。12 秒既能滤掉切场景的瞬时尖峰，
+    # 又不会让电池长时间补电。
     "pd_hold_s": 12.0,
     "pd_release_s": 45.0,      # 达标持续这么久才回退一级（原 90s，回退可以更快）
     "pd_low_hz": True,         # S1：降刷限帧（大头在压低 GPU 负载）
-    "pd_low_hz_value": 60,
+    "pd_low_hz_value": None,   # 降刷目标：None=自动（同 dc_refresh_hz）
     "pd_dim_level": 50,        # S2：亮度封顶
     "pd_cpu_step": 10,         # S3：每级压低 CPU 上限的幅度
     # 60（原 40）：压 CPU 主要是「让瓦给独显」而非省总量，压到 40% 会明显
@@ -247,6 +250,22 @@ def _migrate(cfg: dict) -> None:
         if abs(v - old) < 0.01:
             cfg[key] = DEFAULT_CONFIG[key]
 
+    # 开发机标定值 → 自动（2026-10-10）：下面这些数字曾是某一台开发机的实测
+    # 结果（整机包络 110W / 独显峰值 70W / CPU 96℃ / 独显 88℃ / 降刷 60Hz）。
+    # 它们随源码分发，到了别的机器上就是错的判据 —— 尤其独显上限写大了会让
+    # 「已到顶停止让渡」永远触发不了，白白压 CPU。现在一律交回自动探测。
+    # 只在值**恰好等于旧默认值**时纠正（用户手设过的其它值一律保留）。
+    for key, old in (("power_envelope_watts", 110.0), ("gpu_tgp_max_watts", 70.0),
+                     ("cpu_temp_limit_c", 96.0), ("gpu_temp_limit_c", 88.0),
+                     ("dc_refresh_hz", 60.0), ("pd_low_hz_value", 60.0)):
+        v = cfg.get(key)
+        try:
+            v = float(v)
+        except Exception:
+            continue
+        if abs(v - old) < 0.01:
+            cfg[key] = DEFAULT_CONFIG[key]
+
 
 def save(cfg: dict) -> None:
     try:
@@ -269,17 +288,7 @@ def python_candidates() -> list:
         os.path.join(APP_ROOT, "_runtime", "python", "python.exe"),
         sys.executable,
     ]
-    # 托管解释器（WorkBuddy 内建）—— 必须按当前用户展开，不能写死用户名
-    for base in (os.path.join(os.path.expanduser("~"),
-                              ".workbuddy", "binaries", "python", "versions"),):
-        try:
-            if os.path.isdir(base):
-                vs = sorted(os.listdir(base), reverse=True)
-                if vs:
-                    cands.append(os.path.join(base, vs[0], "python.exe"))
-        except Exception:
-            pass
-    # 常见系统安装位置
+    # 常见系统安装位置（全部按环境变量/当前用户展开，绝不写死用户名）
     for pat in (os.path.join(p, "Python*", "python.exe")
                 for p in (os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python"),
                           r"C:\Python", r"C:\Program Files",
