@@ -25,6 +25,7 @@ from .display import DisplayCtl
 from .learner import Learner
 from .nvmlctl import Nvml, PM_MAXIMUM, PM_MINIMUM
 from .pdbudget import PdBudget
+from .pdsource import PdSource
 from .power import PowerMonitor
 from .profiles import KNOBS, PROFILES, norm_list
 from .thermal import ThermalPolicy
@@ -87,6 +88,13 @@ class Manager:
         self._pd_at = 0.0
         self._pd_hz = 0                # 本模块降到的刷新率（0=未降）
         self._pd_dim = False           # 本模块是否压着亮度
+        # 供电能力辨识（2026-10-10）：供电能力是**当前这个充电器**的属性，
+        # 不是机器的属性。换充电器必然经历一次拔电 → 新会话 → 作废旧值重新现测。
+        self.pdsrc = None
+        try:
+            self.pdsrc = PdSource()
+        except Exception:
+            self.pdsrc = None
 
         # 离电层：电池遥测（ACPI）+ 屏幕刷新率控制 + 亮度优化
         self.bat = BatteryMonitor()
@@ -1010,6 +1018,18 @@ class Manager:
         """
         try:
             ac = bool(st.get("ac"))
+            # ---- 供电会话跟踪：换充电器必须作废上一个充电器学到的上限
+            try:
+                if self.pdsrc is not None:
+                    chg = self.pdsrc.note_ac(ac)
+                    if chg == "new":
+                        adopted = self.pdsrc.adopt_on_start()
+                        self.pd.reset_learning()
+                        if adopted is not None:
+                            self.pd.set_supply(adopted, firm=False)
+                        self._pd_supply_saved = None   # 新会话重新计写入节流
+            except Exception:
+                pass
             if not (self.pd.enabled and ac):
                 if self.pd.active or self._pd_hz or self._pd_dim:
                     self._pd_apply({"reset": True})
@@ -1087,7 +1107,13 @@ class Manager:
             return None
 
     def _pd_save_supply(self, now: Optional[float] = None) -> None:
-        """把学到的电源上限写回 config（限频写入：变化 >3W 且最少间隔 5 分钟）"""
+        """把本次会话学到的供电能力存档（限频：变化 >3W 且最少间隔 5 分钟）。
+
+        不再写 config.pd_supply_w：那个键是**全局**的，换充电器时不会作废，
+        冷启动会被 reload_cfg 当成真值读回来 —— 正是「200W 上学到 130W、
+        带到 100W Type-C 上继续当 130W 用」的成因。现在改存 pd_supply.json，
+        由 PdSource 按供电会话管理。
+        """
         try:
             v = getattr(self.pd, "supply_w", None)
             if not v:
@@ -1099,8 +1125,8 @@ class Manager:
                 return
             self._pd_supply_saved = v
             self._pd_supply_saved_at = now
-            self.cfg["pd_supply_w"] = round(float(v), 1)
-            config.save(self.cfg)
+            if self.pdsrc is not None:
+                self.pdsrc.save(v, firm=bool(getattr(self.pd, "supply_firm", False)))
         except Exception:
             pass
 
@@ -1171,6 +1197,13 @@ class Manager:
         r = self.pd.report()
         r["hz_applied"] = self._pd_hz
         r["dim_applied"] = self._pd_dim
+        try:
+            if self.pdsrc is not None:
+                s = self.pdsrc.summary()
+                r["session_s"] = s.get("session_s")
+                r["history"] = s.get("history") or []
+        except Exception:
+            pass
         return r
 
     # ---------------------------------------------- CPU 限频卡死看门狗
@@ -1346,19 +1379,34 @@ class Manager:
         if path:
             gp.apply_for(path, name)
 
+    def _gp_target(self) -> dict:
+        """按钮/试探要作用在哪个程序上。
+
+        关键：用户点面板按钮时，前台窗口**就是面板自己**，而 hw.foreground()
+        按设计会把自家人排除（返回空进程名）—— 于是四个按钮点了没反应，
+        看起来像"按钮失效"。真实意图显然是"我刚刚在用的那个程序"，所以用
+        `_last_fg`（最近一次非本程序的前台窗口）兜底。learner 的档位投票早就
+        这么干了，gpupick 这层漏了。
+        """
+        from .gpupick import pick_target
+        try:
+            from . import hw as _hw
+            fg = _hw.foreground() or {}
+        except Exception:
+            fg = {}
+        try:
+            return pick_target(fg, self._last_fg)
+        except Exception:
+            return {"process": "", "path": "", "pid": 0, "stale": False}
+
     def gpupick_report(self) -> dict:
         """面板用：整体状态 + 当前前台程序的判定。"""
         try:
             r = self.gpupick.report()
         except Exception:
             r = {"enabled": False}
-        try:
-            from . import hw as _hw
-            fg = _hw.foreground() or {}
-        except Exception:
-            fg = {}
-        name = fg.get("process", "")
-        path = fg.get("path", "")
+        t = self._gp_target()
+        name, path = t["process"], t["path"]
         try:
             mode, src, note, tier = self.gpupick.classify(name)
         except Exception:
@@ -1371,28 +1419,36 @@ class Manager:
             "note": note,
             "tier": tier,
             "managed": bool(path) and path in self.gpupick.data.get("orig", {}),
+            # 面板当前台 ⇒ 显示的是"上一个真实前台程序"，UI 要如实说清楚
+            "stale": t["stale"],
         }
         return r
 
     def gpupick_set(self, exe_name, mode) -> dict:
-        """手动钉住：igpu / dgpu / None（交回系统）。不给名字就钉当前前台程序。"""
+        """手动钉住：igpu / dgpu / None（交回系统）。不给名字就钉当前前台程序。
+
+        用户是在面板上点按钮的，此刻前台就是面板自己 —— 所以名字和路径都从
+        `_gp_target()` 拿（它会退到"上一个真实前台程序"），否则按前台取会拿到
+        空名字，按钮形同失效。
+        """
         try:
-            from . import hw as _hw
-            fg = _hw.foreground() or {}
-            name = exe_name or fg.get("process", "")
+            t = self._gp_target()
+            name = exe_name or t["process"]
             if not name:
                 self.gpupick._last_note = "没有前台程序可钉"
                 return self.gpupick_report()
             self.gpupick.set_user(name, mode if mode in ("igpu", "dgpu") else None)
-            path = fg.get("path", "")
-            same = (fg.get("process", "") or "").lower() == str(name).lower()
-            if path and same:
+            path = t["path"]
+            if path:
                 if mode == "igpu":
                     self.gpupick.reg_set(path, 1)
                 elif mode == "dgpu":
                     self.gpupick.reg_set(path, 2)
                 else:
                     self.gpupick.reg_restore(path)
+            else:
+                self.gpupick._last_note = ("已记住 %s（拿不到完整路径，"
+                                           "注册表偏好下次启动再写）" % name)
         except Exception:
             pass
         return self.gpupick_report()
@@ -1400,9 +1456,8 @@ class Manager:
     def gpupick_probe_start(self, seconds: float = 45.0) -> dict:
         """对当前前台程序发起「试试核显」试探。"""
         try:
-            from . import hw as _hw
-            fg = _hw.foreground() or {}
-            path, name, pid = fg.get("path", ""), fg.get("process", ""), fg.get("pid")
+            t = self._gp_target()
+            path, name, pid = t["path"], t["process"], t["pid"]
             if not path:
                 self.gpupick._last_note = "拿不到前台程序路径"
             else:

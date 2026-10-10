@@ -179,6 +179,32 @@ def test_report_shape():
         ck("report 含字段 %s" % k, k in r)
 
 
+
+def test_pick_target_panel_focus():
+    """面板当前台时（foreground 返回空），按钮要作用在「上一个真实前台程序」上。
+
+    事故（2026-10-10）：四个核显按钮点了没反应 —— 因为用户点按钮时前台就是
+    本面板，hw.foreground() 把自家人排除返回空名字，gpupick_set 直接 return。
+    """
+    from lp.gpupick import pick_target
+    # 前台是别的程序：直接用它
+    t = pick_target({"process": "game.exe", "path": "C:////g////game.exe", "pid": 42},
+                    {"process": "old.exe", "path": "C:////o.exe", "pid": 7})
+    ck("前台有程序就用前台", t["process"] == "game.exe" and t["stale"] is False, t)
+    ck("路径与 pid 一起带出", t["path"].endswith("game.exe") and t["pid"] == 42, t)
+    # 前台是面板自己（self / 空）→ 退到上一个真实前台程序
+    t2 = pick_target({"process": "", "path": "", "pid": 0, "self": True},
+                     {"process": "old.exe", "path": "C:////o.exe", "pid": 7})
+    ck("面板当前台时退到上一个程序", t2["process"] == "old.exe", t2)
+    ck("并标记为 stale（UI 要如实说明）", t2["stale"] is True, t2)
+    ck("stale 也要带出路径，注册表才写得进去", t2["path"] == "C:////o.exe", t2)
+    # 从来没有过真实前台程序 → 全空，不能瞎猜
+    t3 = pick_target({"process": "", "pid": 0}, None)
+    ck("没有可操作对象时返回空", t3["process"] == "" and t3["stale"] is False, t3)
+    t4 = pick_target(None, {"process": "", "pid": 0})
+    ck("last_fg 也是空则返回空", t4["process"] == "", t4)
+
+
 def main():
     test_classify()
     test_apply_and_orig()
@@ -189,6 +215,7 @@ def main():
     test_probe_marginal_and_nodata()
     test_restore_all()
     test_disabled()
+    test_pick_target_panel_focus()
     test_report_shape()
     print("结果: %d 项通过, %d 项失败" % (OK, len(FAIL)))
     for f in FAIL:

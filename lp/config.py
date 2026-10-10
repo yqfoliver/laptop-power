@@ -266,6 +266,13 @@ def _migrate(cfg: dict) -> None:
         if abs(v - old) < 0.01:
             cfg[key] = DEFAULT_CONFIG[key]
 
+    # 供电上限改为「按充电器分别测量」（2026-10-10）：pd_supply_w 是个全局
+    # 常量，在 200W 适配器上学到 130W 后换到 100W 的 Type-C 上它不会作废，
+    # 控制器以为还有 130W 余量 ⇒ 全程不压制 ⇒ 电池一路放电。
+    # 现在由 lp/pdsource.py 按供电会话管理（pd_supply.json），这个键作废。
+    if cfg.get("pd_supply_w") is not None:
+        cfg["pd_supply_w"] = None
+
 
 def save(cfg: dict) -> None:
     try:

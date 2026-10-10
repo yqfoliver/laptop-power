@@ -69,6 +69,17 @@ SUPPLY_JUMP_W = 15.0
 # 计数清零；真实电源能力变化会连续多拍超限，晚几拍才学到，无碍。
 SUPPLY_LB_STREAK = 10
 
+# 「放电」是精确上界，所以下修必须**快**——这是换充电器的兜底通道。
+# 2026-10-10 第三次踩坑：STREAK=10 只管住了充电方向的爬升，放电方向的收敛
+# 却还套着 ±15W 的单步夹 + 0.3 权重。真换了个弱电源时，130W 的旧值要十几拍
+# （一分钟以上）才爬下来，这段时间电池一直在放电——用户看到的就是
+# 「Type-C 打游戏全程从电池取电」。放电是精确上界，只要连续两拍都说供不上，
+# 就该相信它：连续确认挡的是孤立坏值，不是真换电源。
+SUPPLY_DN_STREAK = 2        # 放电方向连续确认拍数（远小于充电方向的 10）
+SUPPLY_DN_JUMP_W = 40.0     # 确认后的单拍最大下修幅度
+SUPPLY_DN_EPS_W = 1.5       # 小于这个差距不算「要下修」
+SUPPLY_DN_EWMA = 0.6        # 确认后的收敛权重（越大越快）
+
 
 class PdBudget:
     """纯决策器：只算「该做什么」，动作由 manager 执行（便于注入测试）。"""
@@ -90,6 +101,8 @@ class PdBudget:
         self.note = ""
         self.stuck = False           # 手段用尽仍在放电
         self._lb_streak = 0          # 充电下界连续超限计数（抬升确认用）
+        self._dn_streak = 0          # 放电上界连续偏低计数（下修确认用）
+        self._src = "未知"           # 上限的来源标签（面板显示）
         self.reload_cfg(cfg)
 
     # ------------------------------------------------------------ 供电上限学习
@@ -108,23 +121,45 @@ class PdBudget:
             est = machine_w - rate_w
             if est < SUPPLY_MIN_W:
                 return
-            # 精确上界：EWMA 收敛，避免单次坏值把估计带跑
-            if self.supply_w is not None:
-                # 跳变保护：与现有估计差太远多半是读数尖峰，只许小步跟随
-                if est > self.supply_w + SUPPLY_JUMP_W:
-                    est = self.supply_w + SUPPLY_JUMP_W
-                elif est < self.supply_w - SUPPLY_JUMP_W:
-                    est = self.supply_w - SUPPLY_JUMP_W
-            self.supply_w = est if self.supply_w is None else \
-                (0.7 * self.supply_w + 0.3 * est)
-            self.supply_firm = True
+            if self.supply_w is None:
+                self.supply_w = est
+                self.supply_firm = True
+                self._src = "本次实测（放电）"
+            else:
+                # 放电是**精确上界**：连续两拍都说「供不上」，就是换了个更弱的
+                # 电源（或者负载真的超了），必须快速认账 —— 慢一拍电池就多放
+                # 一拍的电。孤立坏值不会连续两拍同向，所以这里不需要 10 拍。
+                gap = self.supply_w - est
+                if gap > SUPPLY_DN_EPS_W:
+                    self._dn_streak += 1
+                else:
+                    self._dn_streak = 0
+                if self._dn_streak >= SUPPLY_DN_STREAK:
+                    floor = self.supply_w - SUPPLY_DN_JUMP_W
+                    target = est if est > floor else floor
+                    a = SUPPLY_DN_EWMA
+                    self.supply_w = (1 - a) * self.supply_w + a * target
+                    self._src = "本次实测（放电）"
+                else:
+                    # 单拍：仍按小步跟随，别被一个尖峰拽下去
+                    if est > self.supply_w + SUPPLY_JUMP_W:
+                        est = self.supply_w + SUPPLY_JUMP_W
+                    elif est < self.supply_w - SUPPLY_JUMP_W:
+                        est = self.supply_w - SUPPLY_JUMP_W
+                    self.supply_w = 0.7 * self.supply_w + 0.3 * est
+                    self._src = "本次实测（放电，确认中）"
+                self.supply_firm = True
             self._lb_streak = 0     # 放电精确标定优先，作废未确认的抬升
         else:
+            # 回到充电（或零放电）：供得上了，下修计数必须清零 —— 否则一次
+            # 孤立的假放电会一直挂着，等下一拍再出现真放电就直接"确认"掉。
+            self._dn_streak = 0
             # 下界：只许把估计抬高，绝不拉低（充电受限是常态，不代表电源小）
             lb = machine_w + (-rate_w if rate_w < 0 else 0.0)
             if self.supply_w is None:
                 if lb <= SUPPLY_MAX_W:
                     self.supply_w = lb
+                    self._src = "本次实测（充电下界）"
             elif lb > self.supply_w:
                 # 抬升必须「连续多拍」确认：虚高读数只持续一两拍，中间被
                 # 正常读数打断就把计数清零 —— 堵住棘轮被小步累计顶穿的路
@@ -135,10 +170,12 @@ class PdBudget:
                     if lb <= self.supply_w + SUPPLY_JUMP_W \
                             and lb <= SUPPLY_MAX_W:
                         self.supply_w = lb
+                        self._src = "本次实测（充电下界）"
                     elif lb <= SUPPLY_MAX_W:
                         # 真电源升级（lb 远超估计）：确认充分就小步走，
                         # 几拍之内爬到新上限，不会被卡死
                         self.supply_w += SUPPLY_JUMP_W
+                        self._src = "本次实测（充电下界）"
             else:
                 self._lb_streak = 0
         if self.supply_w is not None:
@@ -168,6 +205,39 @@ class PdBudget:
                         self.supply_w = v
             except Exception:
                 self.supply_w = None
+
+    # ------------------------------------------------------------ 换充电器
+    def reset_learning(self) -> None:
+        """换了充电器：作废旧上限，从头现测。
+
+        这是本轮修复的核心。旧实现持久的那个上限是**全局**的，在 200W 适配器
+        上学到 130W，换到 100W 的 Type-C 上还当 130W 用 —— 控制器以为余量
+        充足，全程不压制，电池一路放电。供电能力是充电器的属性，不是机器的
+        属性，换源必须重新学。
+        """
+        self.supply_w = None
+        self.supply_firm = False
+        self.predicted = False
+        self.predict_armed = False
+        self.pre_s = 0.0
+        self.over_s = 0.0
+        self.ok_s = 0.0
+        self._lb_streak = 0
+        self._dn_streak = 0
+        self._src = "本次供电会话：学习中"
+        # 注意：不清 stage —— 压制动作由 manager 自己在 AC 断开时还原
+
+    def set_supply(self, watts: Optional[float], firm: bool = False) -> None:
+        """外部注入上限（冷启动沿用上次会话的值）。"""
+        try:
+            v = float(watts) if watts is not None else None
+        except Exception:
+            v = None
+        if v is None or not (SUPPLY_MIN_W <= v <= SUPPLY_MAX_W):
+            return
+        self.supply_w = v
+        self.supply_firm = bool(firm)
+        self._src = "沿用上次会话（复核中）"
 
     def _k(self, name: str, default):
         try:
@@ -377,6 +447,7 @@ class PdBudget:
             "machine_w": (round(self.machine_w, 1) if self.machine_w is not None else None),
             "supply_w": (round(self.supply_w, 1) if self.supply_w is not None else None),
             "supply_firm": self.supply_firm,
+            "supply_src": (self._src if self.supply_w is not None else "本次供电会话：学习中"),
             "predicted": self.predicted,
             "predict_armed": self.predict_armed,
             "stuck": self.stuck,

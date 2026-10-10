@@ -373,6 +373,7 @@ function renderBatt(){
     // 整机功耗在「游戏功耗分配」卡里已有，这里只报上限和余量，避免重复
     let t = "Type-C 供电 · 上限 " + w0(pd.supply_w) + " W · 余量 " +
             w0(pd.supply_w - (pd.machine_w||0)) + " W";
+    if(pd.supply_src) t += "（" + pd.supply_src + "）";
     if(pd.supply_w - (pd.machine_w||0) < 8) t += "\n余量吃紧，即将自动限帧保电池";
     advText = t;
   }else if(care.enabled && care.advice && care.advice.length){
@@ -487,12 +488,27 @@ async function setThermal(m){
 
 /* 核显优先（2026-10-10）：核显跑得动的程序不唤醒独显。
    注意 Windows 的图形偏好只对「下次启动该程序」生效，界面上必须说清楚，
-   否则用户点了按钮发现没变化会以为是 bug。 */
+   否则用户点了按钮发现没变化会以为是 bug。
+   2026-10-10 修：点按钮时前台就是本面板，取前台进程会得到空名字 ⇒ 按钮
+   形同失效。后端已改为作用在「上一个真实前台程序」上，这里如实标注出来。 */
 function renderGpuPick(){
   const g = state.gpupick || {};
   const cur = g.current || {};
   const v = document.getElementById("gpVerdict");
   const line = document.getElementById("gpLine");
+  // 自动判定为主：手动按钮只在「自动说了不算」或「有手动设定要撤销」时出现。
+  // 提示一律并进原有的那行 hint —— 面板总高是校准过的，多一行就会溢出滚动条。
+  const show = (el, on)=>{ if(el) el.style.display = on ? "" : "none"; };
+  const pinned = !!cur.managed;
+  const unknown = !cur.src;                  // 名单外，自动没有结论
+  show(document.getElementById("gpIgpu"), !!cur.process && (unknown || pinned || cur.src==="user"));
+  show(document.getElementById("gpDgpu"), !!cur.process && (unknown || pinned || cur.src==="user"));
+  show(document.getElementById("gpAuto"), pinned);
+  show(document.getElementById("gpProbe"), unknown && !!cur.path);
+  const extra = [];
+  if(cur.stale && cur.process) extra.push("面板当前台，操作对象是上一个程序");
+  if(unknown && cur.process) extra.push("名单外，自动不干预");
+  window.__gpExtra = extra.length ? ("（" + extra.join(" · ") + "）") : "";
   const pr = g.probe;
   if(pr && pr.running){
     v.textContent = "试探中 " + Math.round(pr.elapsed) + "/" + Math.round(pr.total) + "s";
@@ -520,7 +536,8 @@ function renderGpuPick(){
   v.style.color = cur.mode==="igpu" ? "var(--green)" : (cur.mode==="dgpu" ? "var(--amber)" : "var(--muted)");
   const src = {user:"你手动指定", probe:"实测结论", builtin:"内置名单"}[cur.src] || "名单外";
   line.textContent = (cur.process || "无前台程序") + " · " + src +
-    (cur.note ? (" · " + cur.note) : "") + " · 下次启动生效";
+    (cur.note ? (" · " + cur.note) : "") + " · 下次启动生效" +
+    (window.__gpExtra || "");
 }
 async function gpSet(m){ await post("/api/gpupick_set",{mode:m}); tick(); }
 document.getElementById("gpIgpu").onclick = ()=>gpSet("igpu");

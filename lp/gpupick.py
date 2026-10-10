@@ -158,6 +158,30 @@ def _atomic_write(path: str, text: str) -> None:
     os.replace(tmp, path)
 
 
+def pick_target(fg: Optional[dict], last_fg: Optional[dict]) -> dict:
+    """面板上的「钉住 / 试探」该作用在哪个程序上。
+
+    用户点按钮时前台窗口**就是本程序的面板**，而 hw.foreground() 按设计会
+    把自家人排除（返回空进程名）—— 直接拿前台用会得到空名字，按钮点了没
+    反应，看起来像失效（2026-10-10 实测）。真实意图是"我刚刚在用的那个
+    程序"，所以退到 last_fg（最近一次非本程序的前台窗口）并标记 stale，
+    让界面如实说明操作对象是谁。
+    """
+    fg = dict(fg or {})
+    if fg.get("process"):
+        return {"process": fg.get("process", "") or "",
+                "path": fg.get("path", "") or "",
+                "pid": int(fg.get("pid") or 0),
+                "stale": False}
+    lf = dict(last_fg or {})
+    if lf.get("process"):
+        return {"process": lf.get("process", "") or "",
+                "path": lf.get("path", "") or "",
+                "pid": int(lf.get("pid") or 0),
+                "stale": True}
+    return {"process": "", "path": "", "pid": 0, "stale": False}
+
+
 class GpuPick:
     """核显优先调度器。注册表与 PDH 均可注入（测试用假通道）。"""
 

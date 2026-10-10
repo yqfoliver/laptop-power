@@ -12,6 +12,8 @@ hwprofile.json
 hwprofile.json.tmp
 gpupick.json
 gpupick.json.tmp
+pd_supply.json
+pd_supply.json.tmp
 battery_report.xml
 面板地址.txt
 run.txt
