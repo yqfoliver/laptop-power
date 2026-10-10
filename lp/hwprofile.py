@@ -70,7 +70,7 @@ IGPU_HINTS = ("iris", "uhd graphics", "hd graphics", "radeon graphics",
 # 学习值：独显功耗峰值（W）的合理区间，超出即视为传感器坏值。
 # 下限取 20 W 是刻意的：独显空载也有几瓦到十几瓦，若把空载值当成"峰值"，
 # 到顶判据会低到离谱（刚进游戏就判定"已到顶"，让渡直接停摆）。
-PEAK_LO_W, PEAK_HI_W = 20.0, 400.0
+PEAK_LO_W, PEAK_HI_W = 20.0, 250.0
 # 峰值每天衰减一点点，给「换驱动 / 换电源 / 夏天」留出回退空间
 PEAK_DECAY_PER_DAY = 0.02
 
@@ -240,6 +240,7 @@ class HwProfile:
         }
         self._last_save = 0.0
         self._dirty = False
+        self._peak_streak = 0        # 峰值抬升的连续确认拍数（挡单次尖峰）
         self.last_filled: List[str] = []     # 最近一次 apply 填了哪些键（供日志）
         self._load()
 
@@ -321,10 +322,20 @@ class HwProfile:
             days = max(0.0, (now - float((self.data["learned"].get("ts") or now))) / 86400.0)
             if days > 1.0:
                 cur = cur * ((1.0 - PEAK_DECAY_PER_DAY) ** days)
+        # 连续确认（2026-10-11）：NVML 会间歇吐大值（曾见 588W/590W）。峰值
+        # **只升不降**、衰减只有每天 2%，所以一次尖峰会把「到顶判据」顶到几十
+        # 天都摸不到的高度 —— 判据达不到，分配器就一直白压 CPU 等一个永不
+        # 到来的「已到顶」，历史事故正是这个形状。故抬升需连续 2 拍确认。
         if cur is None or w > cur:
-            self.data["learned"]["gpu_peak_w"] = round(w, 1)
-            self.data["learned"]["ts"] = now
-            self._dirty = True
+            self._peak_streak += 1
+        else:
+            self._peak_streak = 0
+        if self._peak_streak >= 2:
+            if cur is None or w > cur:
+                self.data["learned"]["gpu_peak_w"] = round(w, 1)
+                self.data["learned"]["ts"] = now
+                self._dirty = True
+            self._peak_streak = 0
         if self._dirty and (now - self._last_save) >= self.SAVE_EVERY:
             self.save()
 

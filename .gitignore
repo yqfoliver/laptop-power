@@ -72,3 +72,6 @@ LaptopPowerAuto-task.xml
 
 # 视频工程文案（B站投稿用，与程序本身无关，不随源码发布）
 B站视频*.md
+
+# 运行时产物：自启加固的重试状态、错误日志、供电会话存档
+autostart_task.json

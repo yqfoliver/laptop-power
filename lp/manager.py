@@ -56,6 +56,13 @@ class Manager:
         self.on_notify = on_notify
         self.current = None          # 首次 apply 前不假设任何档位，避免漏掉初始化
         self.manual = cfg.get("manual_override") or None
+        # 静默底线下的可诊断性：吞咽的异常进 error.log（只写文件，不弹任何东西）
+        try:
+            from . import errlog
+            errlog.set_path(os.path.join(APP_ROOT, "error.log"))
+            errlog.set_enabled(bool(cfg.get("error_log", True)))
+        except Exception:
+            pass
         self._lock = threading.RLock()
         self._plan_cache: Dict[str, pc.PowerPlan] = {}
         self._nv_prev: Optional[int] = None
@@ -800,7 +807,9 @@ class Manager:
                 continue
             if pc.set_value(scheme, s, v, on_bat):
                 done = True
-        self._alloc_applied = v
+        # 写失败绝不能记成已生效：限频看门狗靠 _alloc_applied 判断「期望值」，
+        # 记成生效会让自愈永久失效，面板显示的百分比也是假的。
+        self._alloc_applied = v if done else None
         self._plan_cache.pop(scheme, None)
         return done
 
@@ -824,6 +833,33 @@ class Manager:
         except Exception:
             pass
         return base
+
+    def _igpu_available(self) -> bool:
+        """本机有没有核显可退 —— 弱电源「强制核显」的前置条件。
+
+        无核显机型（部分 HX 独显本、BIOS 里关掉 iGPU 的机器）上，把独显
+        ACPI 断电 = 直接黑屏。所以只有在**明确测到**核显不存在时才拒绝；
+        探测失败/没探测过一律返回 True，不改变既有行为（宁可不特殊照顾，
+        也不能因为探测失败就废掉弱电源策略）。
+        """
+        try:
+            p = getattr(self.hwprof, "profile", None) or {}
+        except Exception:
+            p = {}
+        if not p:
+            return True
+        names = p.get("gpu_names") or []
+        if not names:                 # 连显卡都没枚举出来：不敢下结论
+            return True
+        return bool(p.get("igpu_name"))
+
+    def _err(self, scope: str, exc: BaseException) -> None:
+        """静默地记一笔异常到 error.log（去重/限长，绝不抛、绝不弹窗）。"""
+        try:
+            from . import errlog
+            errlog.log(scope, exc)
+        except Exception:
+            pass
 
     def _alloc_tick(self, st: dict, procs: dict, raw: dict, summary: dict) -> None:
         """游戏档下：读温度/功耗 -> 判定瓶颈 -> 必要时让渡 CPU 预算给独显
@@ -1064,10 +1100,10 @@ class Manager:
             try:
                 self.alloc.set_supply_gpu_budget(
                     self.pd_tier_policy().get("gpu_budget_w"))
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as _e:
+                self._err("pd.alloc_budget", _e)
+        except Exception as _e:
+            self._err("pd", _e)
 
     def _power_snap(self, max_age: float = 20.0,
                     want_gpu: Optional[bool] = None) -> dict:
@@ -1354,10 +1390,11 @@ class Manager:
         # 详见 gpueco.tick 的 force_off 说明。
         force_off = False
         try:
+            # 无核显机型不断电：断掉独显就没有输出设备了（黑屏）
             force_off = bool(self.pd_tier_policy().get("force_igpu")) \
-                and bool(st.get("ac"))
-        except Exception:
-            pass
+                and bool(st.get("ac")) and self._igpu_available()
+        except Exception as _e:
+            self._err("gpueco.force_off", _e)
         try:
             ge.tick(bool(st.get("ac")), getattr(self, "current", None),
                     force_off=force_off)
@@ -1381,8 +1418,8 @@ class Manager:
         gp = self.gpupick
         try:
             gp.reload_cfg(self.cfg)
-        except Exception:
-            pass
+        except Exception as _e:
+            self._err("gpupick.cfg", _e)
         try:
             from . import hw as _hw
             fg = _hw.foreground()
@@ -1404,10 +1441,10 @@ class Manager:
         # 65W 下让独显跑 3D 必然持续从电池取电，比画质下降严重得多。
         try:
             if bool(self.pd_tier_policy().get("force_igpu")) \
-                    and bool(st.get("ac")):
+                    and bool(st.get("ac")) and self._igpu_available():
                 mode = "igpu"
-        except Exception:
-            pass
+        except Exception as _e:
+            self._err("gpupick.tier", _e)
         if mode is None:
             return
         path = (fg or {}).get("path", "")
@@ -1881,8 +1918,8 @@ class Manager:
                     self._cand, self._cand_n = None, 0
                     self.governor.reset()
                     self.alloc.reset()
-            except Exception:
-                pass
+            except Exception as _e:
+                self._err("loop", _e)
             poll = float(self.cfg.get("poll_seconds", 5))
             if not (self.last_battery or {}).get("ac", True):
                 poll = max(8.0, poll * 1.6)   # 离电：检测节奏放慢，自身也省电

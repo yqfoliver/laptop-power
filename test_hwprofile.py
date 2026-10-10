@@ -124,6 +124,7 @@ cfg_b = {"gpu_tgp_max_watts": None}
 hp_b.apply(cfg_b)
 ok(cfg_b["gpu_tgp_max_watts"] == 60.0, "第一轮：填兜底 60", cfg_b["gpu_tgp_max_watts"])
 hp_b.learn_gpu_peak(75.0)            # 后来在游戏里学到了更高的峰值
+hp_b.learn_gpu_peak(75.0)            # 连续两拍确认（峰值抬升的新规则）
 hp_b.apply(cfg_b)
 ok(abs(cfg_b["gpu_tgp_max_watts"] - 77.25) < 0.06,
    "第二轮：自动值跟着抬到 ~77.3，而不是被 60 冻住", cfg_b["gpu_tgp_max_watts"])
@@ -148,9 +149,18 @@ hp4.apply(cfg4)
 ok(cfg4["gpu_eco_auto"] is False, "厂商通道不可用 -> 不每轮白试 GPU Eco")
 
 # ---------------------------------------------------------------- 6. 峰值学习
-print("== 6. 独显峰值学习（只升不降 + 坏值过滤） ==")
+print("== 6. 独显峰值学习（只升不降 + 坏值过滤 + 抬升需连续两拍） ==")
 hp5 = H.HwProfile(path=tmp_json(), prof=p)
 ok(hp5.gpu_peak_w is None, "初始没有峰值")
+# 抬升必须连续两拍确认（2026-10-11）：峰值只升不降、每天只衰减 2%，
+# 一次尖峰会把「到顶判据」顶到几十天都摸不到的高度 —— 判据达不到，
+# 分配器就一直白压 CPU 等一个永不到来的「已到顶」（历史事故就是这个形状）。
+hp5.learn_gpu_peak(68.8)
+ok(hp5.gpu_peak_w is None, "单拍不抬（防传感器尖峰）", hp5.gpu_peak_w)
+hp5.learn_gpu_peak(68.9)
+ok(abs(hp5.gpu_peak_w - 68.9) < 0.05, "连续两拍才抬到 68.9W", hp5.gpu_peak_w)
+hp5 = H.HwProfile(path=tmp_json(), prof=p)
+hp5.learn_gpu_peak(68.8)
 hp5.learn_gpu_peak(68.8)
 ok(abs(hp5.gpu_peak_w - 68.8) < 0.05, "学到 68.8W", hp5.gpu_peak_w)
 hp5.learn_gpu_peak(30.0)
@@ -172,6 +182,7 @@ ok(hp5.gpu_tgp_max() < 100.0,
 print("== 8. 档案与学习值落盘 ==")
 path = tmp_json()
 hp6 = H.HwProfile(path=path, prof=p)
+hp6.learn_gpu_peak(72.4)
 hp6.learn_gpu_peak(72.4)
 hp6.save(force=True)
 hp7 = H.HwProfile(path=path)

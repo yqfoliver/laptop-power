@@ -412,8 +412,9 @@ class BatteryCare:
         self._relief_charge = False
         self._relief_thermal = False
         if base is not None:
-            self._write_ac_proc_max(base)
-        self._relief_base_ac = None
+            # 写成功才清基准：失败留着，下次还能还原（清掉=永久留在降压值上）
+            if self._write_ac_proc_max(base):
+                self._relief_base_ac = None
         self._relief_reason = reason or "降温结束，已还原 CPU 上限"
 
     def reset(self):

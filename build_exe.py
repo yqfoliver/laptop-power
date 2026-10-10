@@ -24,7 +24,8 @@ cmd = [
     "--hidden-import", "lp.hwprofile",
     # pdtier 在 pdbudget/alloc 里是函数内动态 import，静态分析扫不到；
     # 漏了它不会报错，只会让档位策略静默退化成兜底值 —— 必须显式带上。
-    "--hidden-import", "lp.pdtier",        # 硬件自适应（manager 里函数内 import）
+    "--hidden-import", "lp.pdtier",
+    "--hidden-import", "lp.errlog",      # 错误日志（函数内动态 import，漏了=日志永远为空）        # 硬件自适应（manager 里函数内 import）
     "--hidden-import", "lp.gpupick",          # 核显优先调度（同上）
     "--clean", "-y",
     "main.py",

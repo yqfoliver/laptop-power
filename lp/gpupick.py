@@ -271,7 +271,7 @@ class GpuPick:
         """还原成我们介入前的值；原本没有就删除（绝不留下半截）。"""
         if not exe_path:
             return False
-        orig = self.data["orig"].pop(exe_path, None)
+        orig = self.data["orig"].get(exe_path)
         try:
             k = self._key(True)
             if orig is None:
@@ -289,6 +289,8 @@ class GpuPick:
                 else:
                     import winreg
                     winreg.SetValueEx(k, exe_path, 0, winreg.REG_SZ, orig)
+            # 写成功后才抹掉「介入前的原值」：失败就留着，下次还能还原
+            self.data["orig"].pop(exe_path, None)
             self._save()
             return True
         except Exception as e:

@@ -100,6 +100,13 @@ def main(argv=None) -> int:
         print("系统计划：%s" % pc.list_schemes())
         print("当前计划：%s" % pc.active_scheme())
         print("ATKACPI：%s" % diagnose.atk_available())
+        # 静默底线下的可诊断性：巡检里吞掉的异常都记在这里（去重/限长）
+        try:
+            from lp import errlog
+            t = errlog.tail(12).strip()
+            print("error.log：%s" % (t if t else "（空 —— 近期没有内部异常）"))
+        except Exception:
+            pass
         return 0
 
     for flag, key in (("--gaming", "gaming"), ("--battery", "battery"),

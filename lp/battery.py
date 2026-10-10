@@ -275,7 +275,14 @@ class BatteryMonitor:
             rate = -rate
         elif (self.state & CHARGING) and rate > 0:
             rate = -rate
-        self.rate_w = round(rate, 3)
+        # 钳制（2026-10-11）：固件偶尔吐哨兵值/坏值（如 0x80000000 换算出来
+        # 的 -2147483 W）。这个数会被 PD 控制器当成「电池在补电」的直接判据，
+        # 一次坏值就能触发限帧降刷甚至误判供电上限 —— 必须先夹到物理可能的范围。
+        RATE_MAX_W = 250.0
+        if rate != rate or abs(rate) > RATE_MAX_W:
+            self.rate_w = None
+        else:
+            self.rate_w = round(rate, 3)
         return True
 
     # ---------------------------------------------------------- 对外

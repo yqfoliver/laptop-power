@@ -254,8 +254,7 @@ class PowerAllocator:
         core_max = self._avg("core_max")
         cpu_util = self._avg("cpu_util")
         gpu_w = self._avg("gpu_w")
-        gpu_clk = self._avg("gpu_clock")
-        cpu_temp = self._avg("cpu_temp")
+        gpu_temp = self._avg("gpu_temp")
         throttle = set()
         for h in self._hist[-3:]:
             throttle |= set(h.get("gpu_throttle") or [])
@@ -274,7 +273,14 @@ class PowerAllocator:
 
         # 2b) 温度墙优先于功耗墙：独显在降频是因为热，不是因为没有电，
         #     此时把 CPU 的瓦让过去只会让两边都更热（文献：温度每 +10℃ 老化翻倍）。
-        if gpu_util >= 80 and self._thermal_wall(throttle):
+        #     兜底（2026-10-11）：节流原因位来自 nvmlDeviceGetCurrentClocks
+        #     ThrottleReasons，部分驱动/显卡根本没有这个接口（返回空），
+        #     那种机器上温度墙会永远检测不到 —— 分配器误判成「独显瓶颈」，
+        #     继续把 CPU 的瓦让给已经过热的独显。所以再用温度做一道兜底判据
+        #     （上限由 hwprofile 在本机现测，读不到温度就跳过，不硬猜）。
+        if gpu_util >= 80 and (self._thermal_wall(throttle)
+                               or (gpu_temp is not None
+                                   and gpu_temp >= self.gpu_temp_limit)):
             return "gpu_thermal"
 
         # 3) GPU 瓶颈：独显吃满、CPU 还有余量

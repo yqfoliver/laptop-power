@@ -45,6 +45,10 @@ SHORT_SEC = 30          # 平均停留低于此秒数视为「切太急」
 LONG_SEC = 1500         # 平均停留高于此秒数视为「可以更快响应」
 MAX_CONFIRM = 4
 FAIL_LIMIT = 3          # 同一旋钮连续失败这么多次 -> 停用
+# 停用保质期（秒）：失败多半是**瞬时**的（电源紧张时 powercfg 子进程超时、
+# 驱动忙）。旧实现一旦停用就永久生效（只能手动 revive），等于一次抖动让某个
+# 档位的某个能力永远消失。改成记时刻 + 到期自动解禁，成功路径不受影响。
+DISABLE_TTL_S = 3 * 86400.0
 
 DEFAULT = {
     "version": 1,
@@ -300,14 +304,30 @@ class Learner:
         with self._lock:
             self.data["fail"][knob] = int(self.data["fail"].get(knob, 0)) + 1
             if self.data["fail"][knob] >= FAIL_LIMIT:
-                lst = self.data["disabled"].setdefault(mode, [])
-                if knob not in lst:
-                    lst.append(knob)
+                d = self.data["disabled"].setdefault(mode, {})
+                if isinstance(d, list):          # 旧格式（list）平滑迁移
+                    d = {k: time.time() for k in d}
+                    self.data["disabled"][mode] = d
+                if knob not in d:
+                    d[knob] = time.time()
             self.save()
 
     def is_disabled(self, mode: str, knob: str) -> bool:
         with self._lock:
-            return knob in (self.data["disabled"].get(mode) or [])
+            d = self.data["disabled"].get(mode) or {}
+            if isinstance(d, list):     # 旧存档：沿用旧语义（等手动 revive）
+                return knob in d
+            ts = d.get(knob)
+            if ts is None:
+                return False
+            if time.time() - float(ts) > DISABLE_TTL_S:
+                d.pop(knob, None)       # 到期自动解禁：给旋钮一次重新证明的机会
+                try:
+                    self.save()
+                except Exception:
+                    pass
+                return False
+            return True
 
     def revive_all(self) -> None:
         with self._lock:

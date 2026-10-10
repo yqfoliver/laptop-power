@@ -109,20 +109,64 @@ def write_xml():
         return None
 
 
+STATE_NAME = "autostart_task.json"
+# 建任务失败过 2 次后，7 天内不再重试：schtasks 在某些环境（无权限 / 被安全
+# 软件拦截）是**结构性失败**，每次启动都去试一次只是白起一个子进程 + 一行
+# 失败日志。Run 键通道本身不受影响，失败也不弹任何东西（静默底线）。
+FAIL_GIVEUP = 2
+RETRY_AFTER_S = 7 * 24 * 3600.0
+
+
+def _state_path():
+    return os.path.join(APP_ROOT, STATE_NAME)
+
+
+def _load_state() -> dict:
+    try:
+        import json
+        with open(_state_path(), "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _save_state(d: dict) -> None:
+    try:
+        import json
+        with open(_state_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
 def ensure():
     """任务不存在就建一个。返回 True 表示「已存在或已建好」"""
     try:
+        st = _load_state()
+        if int(st.get("fails", 0)) >= FAIL_GIVEUP and \
+                time.time() - float(st.get("last", 0)) < RETRY_AFTER_S:
+            return False          # 已知失败过：静默跳过，不再每启一试
         if task_exists():
+            st["fails"] = 0
+            st["last"] = time.time()
+            _save_state(st)
             return True
         p = write_xml()
         if not p:
             _log("跳过：找不到 exe，无法生成任务 XML")
             return False
         rc, out = _run(["schtasks", "/create", "/tn", TASK_NAME, "/xml", p, "/f"])
+        st["last"] = time.time()
         if rc == 0:
+            st["fails"] = 0
+            _save_state(st)
             _log("已创建计划任务 %s（登录延迟 15s 启动）" % TASK_NAME)
             return True
-        _log("创建计划任务失败 rc=%d out=%s" % (rc, out[:160]))
+        st["fails"] = int(st.get("fails", 0)) + 1
+        _save_state(st)
+        _log("创建计划任务失败 rc=%d out=%s（累计失败 %d 次%s）"
+             % (rc, out[:160], st["fails"],
+                "，7 天内不再重试" if st["fails"] >= FAIL_GIVEUP else ""))
         return False
     except Exception as e:
         _log("ensure 异常 %s: %s" % (type(e).__name__, e))

@@ -242,9 +242,10 @@ class ThermalPolicy:
             return False
         changed = False
         for attr, val in list(self._hw_saved.items()):
+            # 写成功才丢掉原值：失败就留着下次再试，否则原值一丢就永久还原不回
             if self.pp.write_range(self.scheme, attr, val):
                 changed = True
-            self._hw_saved.pop(attr, None)
+                self._hw_saved.pop(attr, None)
         if changed and self._is_active():
             self.pp.set_active(self.scheme)
         self._hw_applied = {}

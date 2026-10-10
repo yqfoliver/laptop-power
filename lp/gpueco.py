@@ -39,6 +39,12 @@ M_DSTS = 0x53545344     # ATKACPI 读（注意：这是模块级常量，不是 
 M_DEVS = 0x53564544     # ATKACPI 写
 
 
+# 判死保质期（秒）：一次瞬时失败不该让通道整个会话停用。
+# 4294967295 这类坏值 / 驱动忙 / 电源紧张时的写入失败都是暂时的，
+# 10 分钟后自动再给一次机会；仍失败会再次进入保质期，不会刷屏重试。
+BROKEN_TTL_S = 600.0
+
+
 class GpuEco:
     """独显 Eco 自动化。atk 可注入（测试用假通道），缺省用 lp.atkacpi 单例。"""
 
@@ -47,6 +53,7 @@ class GpuEco:
         self.enabled = True          # 自动开关（config gpu_eco_auto）
         self._applied: Optional[int] = None   # 本模块最后一次成功写入的目标值
         self._broken = False         # 通道失效（写不生效）后不再打扰
+        self._broken_at = 0.0        # 判死时刻：只保 BROKEN_TTL 秒，之后给一次机会
         self._fails = 0              # 连续失败计数（按 set 轮次）
         self._last_note = ""
         self._dbg = ""               # 最近一次读失败的原因（诊断用）
@@ -102,8 +109,14 @@ class GpuEco:
     def set(self, target: int) -> bool:
         """把独显 Eco 设到目标值（0=开独显 1=断电）。已到位则零写入。"""
         target = 1 if target else 0
+        # 判死带保质期（2026-10-11）：瞬时失败（电源紧张、驱动忙）不该让整
+        # 个会话的独显断电功能永久停用。过期后自动再试一次，成功即清零。
         if self._broken:
-            return False
+            import time as _t
+            if _t.time() - self._broken_at < BROKEN_TTL_S:
+                return False
+            self._broken = False
+            self._fails = 0
         cur = self.read()
         if cur is not None and cur == target:
             self._applied = target
@@ -134,8 +147,10 @@ class GpuEco:
             self._fails += 1        # 按 set() 轮次计失败，连续 3 轮判死
             self._last_note = "写后回读未确认（目标 %d）" % target
             if self._fails >= 3:
+                import time as _t
                 self._broken = True
-                self._last_note += "，通道已放弃"
+                self._broken_at = _t.time()
+                self._last_note += "，通道暂时放弃（%d 秒后重试）" % int(BROKEN_TTL_S)
         return ok
 
     # -------------------------------------------------- 自动化 tick

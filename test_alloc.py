@@ -163,6 +163,32 @@ finally:
 
 print()
 print("=" * 72)
+print("3.5) 温度墙兜底：节流原因位不可用时不误判")
+print("=" * 72)
+# 真实事故风险（2026-10-11）：nvmlDeviceGetCurrentClocksThrottleReasons 在
+# 部分驱动/显卡上不存在（返回空）。那种机器上「温度墙」永远检测不到，
+# 分配器会误判成 gpu_bound，继续把 CPU 的瓦让给已经过热的独显。
+_a = PowerAllocator({"gpu_temp_limit_c": 87, "gpu_tgp_max_watts": 70})
+def _feed(a, **kw):
+    a._hist.clear()
+    for _ in range(3):
+        a._hist.append(dict(kw))
+    return a.classify()
+_v = _feed(_a, gpu_util=92.0, gpu_w=60.0, gpu_temp=91.0, gpu_throttle=[],
+           core_max=70.0, cpu_util=70.0)
+check("温度超上限 + 无节流原因 → gpu_thermal", _v == "gpu_thermal", _v)
+_v = _feed(_a, gpu_util=92.0, gpu_w=60.0, gpu_temp=80.0, gpu_throttle=[],
+           core_max=70.0, cpu_util=70.0)
+check("温度正常 + 无节流原因 → 不误报温度墙", _v == "gpu_bound", _v)
+_v = _feed(_a, gpu_util=92.0, gpu_w=60.0, gpu_temp=None, gpu_throttle=[],
+           core_max=70.0, cpu_util=70.0)
+check("读不到温度时跳过兜底（不硬猜）", _v == "gpu_bound", _v)
+_v = _feed(_a, gpu_util=92.0, gpu_w=60.0, gpu_temp=80.0,
+           gpu_throttle=["\u6e29\u5ea6\u5899 SW_THERMAL"], core_max=70.0, cpu_util=70.0)
+check("节流原因位可用时照旧走原因判据", _v == "gpu_thermal", _v)
+
+print()
+print("=" * 72)
 print("4) 报告字段")
 print("=" * 72)
 m.current = None
