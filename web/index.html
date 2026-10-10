@@ -217,6 +217,17 @@
   </div>
   </div>
   </div>
+
+  <div class="card" id="gpCard">
+    <div class="ct"><span class="t">核显优先</span><span class="r" id="gpVerdict" style="color:var(--muted)">—</span></div>
+    <div class="hint" id="gpLine">—</div>
+    <div class="fanbtns">
+      <button class="btn" id="gpIgpu">用核显</button>
+      <button class="btn" id="gpDgpu">用独显</button>
+      <button class="btn" id="gpAuto">交回系统</button>
+      <button class="btn" id="gpProbe">试试核显</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -272,6 +283,8 @@ function render(){
   const ab = document.getElementById("autoBtn");
   ab.textContent = auto ? "✔ 自动判定已开启" : "自动判定已关闭（点此开启）";
   ab.className = "autoBanner" + (auto?"":" off");
+
+  try{ renderGpuPick(); }catch(e){ document.title = "面板渲染异常(GP): " + ((e&&e.message)||e); }
 
   const p = document.getElementById("power");
   // 只显示电源状态；电量在旁边 🔋 chip 里（两个 chip 都带 % 就重复了）
@@ -471,6 +484,52 @@ async function setThermal(m){
   await post("/api/thermal_set",{mode:m});
   tick();
 }
+
+/* 核显优先（2026-10-10）：核显跑得动的程序不唤醒独显。
+   注意 Windows 的图形偏好只对「下次启动该程序」生效，界面上必须说清楚，
+   否则用户点了按钮发现没变化会以为是 bug。 */
+function renderGpuPick(){
+  const g = state.gpupick || {};
+  const cur = g.current || {};
+  const v = document.getElementById("gpVerdict");
+  const line = document.getElementById("gpLine");
+  const pr = g.probe;
+  if(pr && pr.running){
+    v.textContent = "试探中 " + Math.round(pr.elapsed) + "/" + Math.round(pr.total) + "s";
+    v.style.color = "var(--amber)";
+    line.textContent = "已设为核显 —— 重启 " + (pr.exe_name||"该程序") +
+      " 后开始采样（样本 " + pr.samples + " · 当前 " +
+      (pr.last==null ? "—" : Math.round(pr.last)+"%") + "）";
+    return;
+  }
+  if(!g.enabled){
+    v.textContent = "已关闭"; v.style.color = "var(--muted)";
+    line.textContent = "核显优先调度未启用";
+    return;
+  }
+  if(pr && pr.verdict){
+    const m = {ok:"核显游刃有余，已固化", marginal:"核显勉强够，先留着",
+               hard:"核显吃力，已退回独显", no_data:"没采到有效样本"};
+    v.textContent = "试探结束"; v.style.color = "var(--muted)";
+    line.textContent = (m[pr.verdict]||pr.verdict) +
+      (pr.p90!=null ? ("（核显占用 " + Math.round(pr.p90) + "%）") : "");
+    return;
+  }
+  const mm = {igpu:"走核显", dgpu:"走独显"};
+  v.textContent = mm[cur.mode] || "不干预";
+  v.style.color = cur.mode==="igpu" ? "var(--green)" : (cur.mode==="dgpu" ? "var(--amber)" : "var(--muted)");
+  const src = {user:"你手动指定", probe:"实测结论", builtin:"内置名单"}[cur.src] || "名单外";
+  line.textContent = (cur.process || "无前台程序") + " · " + src +
+    (cur.note ? (" · " + cur.note) : "") + " · 下次启动生效";
+}
+async function gpSet(m){ await post("/api/gpupick_set",{mode:m}); tick(); }
+document.getElementById("gpIgpu").onclick = ()=>gpSet("igpu");
+document.getElementById("gpDgpu").onclick = ()=>gpSet("dgpu");
+document.getElementById("gpAuto").onclick = ()=>gpSet("");
+document.getElementById("gpProbe").onclick = async ()=>{
+  await post("/api/gpupick_probe",{seconds:45});
+  tick();
+};
 
 tick();
 setInterval(tick, 2000);

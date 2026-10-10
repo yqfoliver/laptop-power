@@ -110,6 +110,14 @@ DEFAULT_CONFIG = {
     "clamshell_enabled": False,
     "clamshell_on_battery": False,
     "gpu_eco_auto": True,             # 离电时独显 ACPI 断电（GHelper GPU Eco 通道，插电还原）       # 是否允许离电时也保持不休眠（默认只在插电时）
+    # --- 核显优先调度（2026-10-10 新增）：核显跑得动的程序就不唤醒独显 ---
+    # 走的是 Windows 自带的「图形首选项」通道（HKCU\...\UserGpuPreferences），
+    # 普通权限可写、不需要驱动，且优先于厂商控制面板的程序设置。
+    # 注意：偏好只对**下次启动该程序**生效，运行中的程序不受影响。
+    "gpupick_enabled": True,
+    # 本机核显能力档位：None=首次启动自动探测（见 gpupick.detect_igpu_tier）
+    # 1=入门核显（只敢跑 tier1）2=中端（780M/Iris Xe 级）3=高性能（890M/Arc 级）
+    "gpupick_igpu_tier": None,
     "gc_trim": True,                     # 常驻进程每 15 分钟压缩一次工作集（GHelper MemoryHelper 思路）
     # 面板引擎：auto = GDI 原生面板优先（稳定），失败再退浏览器；
     #            gdi = 只用 GDI；browser = 只用浏览器；

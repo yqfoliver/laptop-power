@@ -112,6 +112,18 @@ class Manager:
         from .gpueco import GpuEco
         self.gpu_eco = GpuEco()
         self.gpu_eco.enabled = bool(cfg.get("gpu_eco_auto", True))
+        # 核显优先调度（2026-10-10 新增）：核显跑得动的程序不唤醒独显。
+        # 本机核显档位首次运行自动探测一次并写回 config，之后以配置为准。
+        from .gpupick import GpuPick, detect_igpu_tier
+        self.gpupick = GpuPick()
+        if cfg.get("gpupick_igpu_tier") is None:
+            cfg["gpupick_igpu_tier"] = detect_igpu_tier()
+            try:
+                from . import config as _cfgmod
+                _cfgmod.save(cfg)
+            except Exception:
+                pass
+        self.gpupick.reload_cfg(cfg)
         # 常驻进程内存瘦身（对标 GHelper MemoryHelper.SetProcessWorkingSetSize）
         self._trim_at = 0.0
         self._trim_last_mb = 0.0
@@ -641,6 +653,7 @@ class Manager:
             "pd": self.pd_report(),
             "pd_line": self.pd.line(),
             "gpu_eco": self.gpu_eco.report(),
+            "gpupick": self.gpupick_report(),
             "ppm_note": self._ppm_note,
             "ppm_fixes": self._ppm_fixes,
             # 面板字体比例（config.panel_font_scale，网页端用 CSS zoom 应用）
@@ -858,6 +871,7 @@ class Manager:
             self.clamshell.reload_cfg(self.cfg)
             if not self.clamshell.enabled and self.clamshell.engaged:
                 self.clamshell.reset(reason="合盖不休眠已关闭，还原合盖动作")
+            self.gpupick.reload_cfg(self.cfg)
         except Exception:
             pass
 
@@ -937,6 +951,7 @@ class Manager:
         self._thermal_tick()
         self._clamshell_tick(st)
         self._gpu_eco_tick(st)
+        self._gpupick_tick(st)
         self._trim_tick()
         self._ppm_watchdog(st)
         return info
@@ -1250,6 +1265,122 @@ class Manager:
             ge.tick(bool(st.get("ac")), getattr(self, "current", None))
         except Exception:
             pass
+
+    def _gpupick_tick(self, st: dict) -> None:
+        """核显优先调度（2026-10-10 新增）。
+
+        只做两件事：推进手动试探采样；把「名单命中 / 用户钉住」的前台程序
+        写成核显偏好。名单外的程序一个字节都不动 —— 拿用户正在玩的游戏
+        赌帧率是越界行为。写注册表是给**下次启动**准备的，运行中的程序不受影响。
+        """
+        gp = self.gpupick
+        try:
+            gp.reload_cfg(self.cfg)
+        except Exception:
+            pass
+        try:
+            from . import hw as _hw
+            fg = _hw.foreground()
+        except Exception:
+            return
+        name = (fg or {}).get("process", "")
+        # 试探进行中：先跟上 pid（程序重启后 pid 会变），再采一个样本
+        if gp._probe and not gp._probe["done"]:
+            if name == gp._probe["exe_name"] and fg.get("pid"):
+                gp._probe["pid"] = fg["pid"]
+            gp.probe_tick()
+            return                      # 试探期间不再做常规应用，免得互相打架
+        if not gp.enabled or not name:
+            return
+        if getattr(self, "current", None) == "balanced":
+            return                      # 系统自带平衡档：一切自动化不干预
+        mode, _src, _note, _tier = gp.classify(name)
+        if mode is None:
+            return
+        path = (fg or {}).get("path", "")
+        if path:
+            gp.apply_for(path, name)
+
+    def gpupick_report(self) -> dict:
+        """面板用：整体状态 + 当前前台程序的判定。"""
+        try:
+            r = self.gpupick.report()
+        except Exception:
+            r = {"enabled": False}
+        try:
+            from . import hw as _hw
+            fg = _hw.foreground() or {}
+        except Exception:
+            fg = {}
+        name = fg.get("process", "")
+        path = fg.get("path", "")
+        try:
+            mode, src, note, tier = self.gpupick.classify(name)
+        except Exception:
+            mode, src, note, tier = None, "", "", 0
+        r["current"] = {
+            "process": name,
+            "path": path,
+            "mode": mode,
+            "src": src,
+            "note": note,
+            "tier": tier,
+            "managed": bool(path) and path in self.gpupick.data.get("orig", {}),
+        }
+        return r
+
+    def gpupick_set(self, exe_name, mode) -> dict:
+        """手动钉住：igpu / dgpu / None（交回系统）。不给名字就钉当前前台程序。"""
+        try:
+            from . import hw as _hw
+            fg = _hw.foreground() or {}
+            name = exe_name or fg.get("process", "")
+            if not name:
+                self.gpupick._last_note = "没有前台程序可钉"
+                return self.gpupick_report()
+            self.gpupick.set_user(name, mode if mode in ("igpu", "dgpu") else None)
+            path = fg.get("path", "")
+            same = (fg.get("process", "") or "").lower() == str(name).lower()
+            if path and same:
+                if mode == "igpu":
+                    self.gpupick.reg_set(path, 1)
+                elif mode == "dgpu":
+                    self.gpupick.reg_set(path, 2)
+                else:
+                    self.gpupick.reg_restore(path)
+        except Exception:
+            pass
+        return self.gpupick_report()
+
+    def gpupick_probe_start(self, seconds: float = 45.0) -> dict:
+        """对当前前台程序发起「试试核显」试探。"""
+        try:
+            from . import hw as _hw
+            fg = _hw.foreground() or {}
+            path, name, pid = fg.get("path", ""), fg.get("process", ""), fg.get("pid")
+            if not path:
+                self.gpupick._last_note = "拿不到前台程序路径"
+            else:
+                self.gpupick.probe_start(path, name, pid, seconds)
+        except Exception as e:
+            self.gpupick._last_note = "试探启动失败：%r" % e
+        return self.gpupick_report()
+
+    def gpupick_probe_cancel(self) -> dict:
+        try:
+            self.gpupick.probe_cancel()
+        except Exception:
+            pass
+        return self.gpupick_report()
+
+    def gpupick_restore_all(self) -> dict:
+        """一键把所有被本模块改过的条目还原成原值。"""
+        try:
+            n = self.gpupick.restore_all()
+            self.gpupick._last_note = "已还原 %d 个条目" % n
+        except Exception:
+            pass
+        return self.gpupick_report()
 
     # -------------------------------------------------------- 常驻内存瘦身
     def _trim_tick(self) -> None:

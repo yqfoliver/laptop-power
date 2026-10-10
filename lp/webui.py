@@ -145,6 +145,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, checkup.run_checks(mgr, deep=deep))
             except Exception as e:
                 self._json(200, {"error": str(e), "items": [], "startups": []})
+        elif path == "/api/gpupick":
+            self._json(200, mgr.gpupick_report())
         elif path == "/api/thermal":
             try:
                 from . import hw as _hw
@@ -294,6 +296,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "need mode/knob"})
             else:
                 self._json(200, mgr.clear_knob_pref(mode, knob))
+        elif path == "/api/gpupick":
+            self._json(200, mgr.gpupick_report())
+        elif path == "/api/gpupick_set":
+            # mode: igpu / dgpu / 空串（交回系统）；不传程序名则用当前前台程序
+            mode = str((data or {}).get("mode") or "").lower()
+            mode = mode if mode in ("igpu", "dgpu") else None
+            self._json(200, mgr.gpupick_set((data or {}).get("process") or None, mode))
+        elif path == "/api/gpupick_probe":
+            try:
+                secs = float((data or {}).get("seconds") or 45)
+            except Exception:
+                secs = 45.0
+            self._json(200, mgr.gpupick_probe_start(max(10.0, min(120.0, secs))))
+        elif path == "/api/gpupick_probe_cancel":
+            self._json(200, mgr.gpupick_probe_cancel())
+        elif path == "/api/gpupick_restore_all":
+            self._json(200, mgr.gpupick_restore_all())
         elif path == "/api/thermal_set":
             mode = str((data or {}).get("mode") or "").lower()
             if mode not in ("auto", "quiet", "perf"):

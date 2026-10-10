@@ -125,6 +125,29 @@ def _process_name(pid: int) -> str:
     return ""
 
 
+def _process_path(pid: int) -> str:
+    """拿到进程的 exe 完整路径（写注册表 GPU 偏好要用完整路径）。
+
+    与 _process_name 同通道但保留目录部分；失败返回空串而不是 None，
+    调用方只需判断真假。
+    """
+    for access in (PROCESS_QUERY_LIMITED_INFORMATION,
+                   PROCESS_QUERY_INFORMATION | PROCESS_VM_READ):
+        h = k32.OpenProcess(access, False, int(pid))
+        if not h:
+            continue
+        try:
+            size = wintypes.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if k32.QueryFullProcessImageNameW(h, 0, buf, byref(size)):
+                full = buf.value
+                if full:
+                    return full
+        finally:
+            k32.CloseHandle(h)
+    return ""
+
+
 # ------------------------------------------------------------- 电源状态
 def power_status() -> dict:
     """返回 AC 是否在线、电池百分比、充放电状态"""
@@ -268,7 +291,7 @@ def foreground() -> dict:
     兜底 —— WebView2 渲染进程等特殊窗口的 pid 不一定还在本进程里
     （2026-10-08 实测截图出现过自己把自己当前台）。
     """
-    res = {"process": "", "title": "", "fullscreen": False}
+    res = {"process": "", "title": "", "fullscreen": False, "pid": 0, "path": ""}
     try:
         hwnd = u32.GetForegroundWindow()
         if not hwnd:
@@ -284,13 +307,17 @@ def foreground() -> dict:
 
         if pid.value:
             res["process"] = _process_name(pid.value)
+            # pid / exe 完整路径：GPU 偏好要按完整路径写注册表，
+            # 利用率探针要按 pid 采样（2026-10-10 新增）
+            res["pid"] = int(pid.value)
+            res["path"] = _process_path(pid.value)
             # 兜底 1：前台进程就是本程序的 exe（onefile 双进程等形态）
             try:
                 if sys.executable and \
                         res["process"].lower() == os.path.basename(sys.executable).lower():
                     res.clear()
                     res.update({"process": "", "title": "", "fullscreen": False,
-                                "self": True})
+                                "self": True, "pid": 0, "path": ""})
                     return res
             except Exception:
                 pass
@@ -298,7 +325,7 @@ def foreground() -> dict:
         if res.get("title") and res["title"] in _SELF_WINDOW_TITLES:
             res.clear()
             res.update({"process": "", "title": "", "fullscreen": False,
-                        "self": True})
+                        "self": True, "pid": 0, "path": ""})
         # 全屏判定：矩形铺满显示器 且 没有标题栏/边框样式（否则最大化的普通应用会被误判）
         GWL_STYLE = -16
         WS_CAPTION = 0x00C00000

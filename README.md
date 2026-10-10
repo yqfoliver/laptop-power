@@ -113,7 +113,8 @@ schtasks /create /tn "LaptopPowerAuto" /xml "LaptopPowerAuto-task.xml" /f
 
 （需在**非沙箱的系统终端**执行；登录触发 + 延迟 15 秒。）
 
-导入前先把 `LaptopPowerAuto-task.xml` 里两处 `<你的用户名>` 换成你自己的路径。
+`LaptopPowerAuto-task.xml` 由程序在首次运行时自动生成（含你的真实 exe 路径，不入库）；
+也可以用 `python tools/make_task_xml.py` 生成一份模板，手动改好路径再用。
 
 ---
 

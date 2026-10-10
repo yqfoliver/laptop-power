@@ -37,7 +37,11 @@ PANEL_W = 560
 # 2026-10-08：424 是旧版校准值，之后页面新增了「PD 余量 / 充电上限」等
 # 状态行，实测内容 429px 起步（告警时更高）→ 底部溢出 5px，滚动条偶现。
 # 提到 444 并配合 body overflow:hidden 双保险。
-PANEL_H = 444
+# 2026-10-10：新增「核显优先」卡片（84px），实测 wrap 底边 496 / 文档
+# scrollHeight 506 ⇒ 再提到 512，同样用探针量过（tools/panel_height_check.py）。
+# 教训复述：网页每加一行都要重量一次，body overflow:hidden 会**裁掉**溢出
+# 内容而不是出滚动条，静默丢信息比滚动条更糟。
+PANEL_H = 528
 
 HRESULT = c_long
 S_OK = 0

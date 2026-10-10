@@ -60,5 +60,9 @@ tools/_*/
 *.lnk
 发布到GitHub说明.md
 
+# 部署产物：程序自愈会用真实 exe 路径重写它们（tools/make_task_xml.py 是脱敏模板）
+LaptopPowerAuto-task.xml
+静默启动.vbs
+
 # 视频工程文案（B站投稿用，与程序本身无关，不随源码发布）
 B站视频*.md
