@@ -60,10 +60,16 @@ def main():
     print("remote HEAD %s | 远程 %d 个文件" % (remote_sha[:10], len(remote_blobs)))
 
     # 索引条目：<mode> <sha> <stage>\t<path>。sha 与本地 tree 里的 blob 完全一致
+    # 必须用 -z：默认输出对非 ASCII 路径做 quotepath 转义，转义串会被当成
+    # 字面路径传上去（远端因此挂过 6 个 "\345..." 乱码名文件）
     import base64
+    raw = subprocess.run(["git", "ls-files", "-s", "-z"],
+                         capture_output=True, timeout=120).stdout
     entries = []
-    for line in git("ls-files", "-s").splitlines():
-        meta, _, path = line.partition("\t")
+    for rec in raw.split(b"\0"):
+        if not rec:
+            continue
+        meta, _, path = rec.decode("utf-8").partition("\t")
         mode, sha, _stage = meta.split()
         if path.strip():
             entries.append((mode, sha, path.strip()))
