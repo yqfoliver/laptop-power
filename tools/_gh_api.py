@@ -55,20 +55,47 @@ def _token_once() -> str:
     return ""
 
 
+ASK = "protocol=https\nhost=github.com\n\n"
+
+
+def _run_cred(cmd) -> str:
+    """跑一条取凭据的命令，从 stdout 里抠 password=（命令失败/超时就当没取到）。"""
+    try:
+        r = subprocess.run(cmd, input=ASK, capture_output=True, text=True,
+                           timeout=60)
+    except Exception:
+        return ""
+    out = (r.stdout or "") + "\n" + (r.stderr or "")
+    for line in out.splitlines():
+        if line.startswith("password="):
+            return line[len("password="):].strip()
+    return ""
+
+
 def _token_ask() -> str:
     """从本机 Git Credential Manager 取令牌（不落盘、不打印）。
 
-    用**临时文件中转**而不是管道：git credential 会拉起 GCM 子进程，
+    三条路按顺序试，哪条通走哪条 —— 2026-10-11 实测只有第 2 条通：
+
+    1. `git credential fill`：在这台机器上直接报
+       `fatal: could not read Username for 'https://github.com'`
+       —— 全局配置里 `credential.helper=` 是空值（Git for Windows 用它
+       屏蔽系统级 helper），靠 `helperselector` 中转，而 selector 在这台
+       机器上返回空。git push 自己加 `-c credential.helper=manager` 能过。
+    2. `git credential-manager get`：直呼 GCM 本体，稳定返回 username/password。
+    3. `git-credential-helper-selector fill`：换个机器可能只有这条通。
+
+    第 1 条走**临时文件中转**而不是管道：git credential 会拉起 GCM 子进程，
     子进程继承管道句柄 —— 父进程超时被杀后管道仍不关闭，`capture_output`
     会永久阻塞在 read() 上（实测：60s timeout 形同虚设，脚本挂十几分钟）。
-    重定向到文件就没有这个问题。
     """
     import tempfile
     fd_in, pin = tempfile.mkstemp(prefix="ghcred_in_")
     fd_out, pout = tempfile.mkstemp(prefix="ghcred_out_")
+    out = ""
     try:
         with os.fdopen(fd_in, "w") as f:
-            f.write("protocol=https\nhost=github.com\n\n")
+            f.write(ASK)
         with open(pin, "r") as fi, open(pout, "w") as fo:
             try:
                 subprocess.run(["git", "credential", "fill"],
@@ -89,6 +116,14 @@ def _token_ask() -> str:
     for line in out.splitlines():
         if line.startswith("password="):
             return line[len("password="):].strip()
+
+    # 直呼 GCM 本体 / selector（这两条是同步管道，GCM 不会拉起交互子进程，
+    # 不存在上面那个挂死问题，可以直接用 capture_output）
+    for cmd in (["git", "credential-manager", "get"],
+                ["git-credential-helper-selector", "fill"]):
+        v = _run_cred(cmd)
+        if v:
+            return v
     return ""
 
 
