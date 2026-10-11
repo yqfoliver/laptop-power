@@ -1541,8 +1541,9 @@ class Manager:
                 r = care.restore_limit()
                 w = r.get("write") or {}
                 if w.get("ok"):
-                    return {"ok": True, "msg": "已回到养护上限 %d%%" % care.target_limit}
-                return self._chg_limit_result(w, care.target_limit, "回养护")
+                    return {"ok": True, "pending": True,
+                            "msg": "已下发养护上限 %d%%，EC 约 15 分钟内生效" % care.target_limit}
+                return self._chg_limit_result(w, care, care.target_limit, "回养护")
             if action == "clear":
                 care.clear_intent("手动结束充满意图")
                 return {"ok": True, "msg": "已结束本次充满"}
@@ -1550,18 +1551,26 @@ class Manager:
                 "manual", "travel", "calibrate") else "manual")
             w = r.get("write") or {}
             if w.get("ok"):
-                return {"ok": True, "msg": "已切到 %d%%，本次允许充满" % care.full_limit}
-            return self._chg_limit_result(w, care.full_limit, "充满")
+                return {"ok": True, "pending": True,
+                        "msg": "已下发 %d%%，本次允许充满（EC 约 15 分钟内生效）"
+                               % care.full_limit}
+            return self._chg_limit_result(w, care, care.full_limit, "充满")
         except Exception as e:
             return {"ok": False, "msg": "充电上限操作失败：%r" % (e,)}
 
-    def _chg_limit_result(self, w: dict, value: int, what: str) -> dict:
+    def _chg_limit_result(self, w: dict, care, value: int, what: str) -> dict:
         """写入没成功时：能提权就提请权，不能就让用户去 MyASUS。"""
         if w.get("need_admin"):
             from . import hw as _hwm
             if _hwm.elevate_self("--set-charge-limit %d" % value):
-                return {"ok": True, "elevating": True,
-                        "msg": "已请求管理员权限，请在 UAC 里确认（确认后自动切换）"}
+                # 提权子进程写完之后 EC 还要十几分钟才跟上 —— 主进程这里也置成
+                # 「待生效」，否则面板会立刻显示成已经切换成功，是假反馈。
+                try:
+                    care._start_pending(int(value))
+                except Exception:
+                    pass
+                return {"ok": True, "elevating": True, "pending": True,
+                        "msg": "已请求管理员权限，请在 UAC 里确认（确认后约 15 分钟生效）"}
             return {"ok": False, "elevating": False,
                     "msg": "提权失败（UAC 被取消？）。也可自己去 MyASUS → 设备设置 → "
                            "电池健康充电 切换"}

@@ -5,10 +5,10 @@
 只验证「统计口径 + 评分 + 降温动作的写入/还原时序」。
 用法：python test_care.py
 """
-import json
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lp import batterycare as bc   # noqa: E402
@@ -473,6 +473,99 @@ c2.set_full_intent(reason="calibrate")
 c2.feed(batt(ac=False, discharging=True, pct=60, rate=20.0), 45.0, 60.0)
 ok(c2.calib_due() is False and c2.calib_days_since() == 0,
    "校准意图走完一轮 -> 记下校准日期", c2.calib_days_since())
+
+# ============================================================
+# 30~34. 上限下发后的「生效确认」
+#
+# 2026-10-11 实测：写完注册表后 EC 约 13 分钟才改变充电行为，中间还被
+# 厂商服务回滚过一次。所以「写完回读 == 目标值」是**假成功**，必须靠
+# 电量行为事后确认，并且发现被回滚要重写一次。
+# ============================================================
+def fresh_mut(chg, path=None):
+    """chg 内容可变（用来模拟厂商服务把值改回去）。"""
+    payload = dict(chg)
+    bc.pc = FakePC()
+    c = bc.BatteryCare({}, path or tmp_json(), chg_reader=(lambda: dict(payload)))
+    return c, payload
+
+
+def mk_writer(pay):
+    """写成功的同时把「注册表」也改掉（贴近真实：写完回读就是新值）。"""
+    def w(v):
+        v = int(v)
+        pay["value"] = v
+        pay["mode_cn"] = {100: "满容量模式", 80: "平衡模式", 60: "长效使用模式"}[v]
+        return {"ok": True, "before": 80, "after": v, "need_admin": False,
+                "reason": "", "key": "fake", "ec_confirmed": False}
+    return w
+
+
+print("== 30. 写入成功 ≠ 已生效：先置「待生效」，不谎报 ==")
+c, pay = fresh_mut(ASUS_80)
+c._lim_writer = mk_writer(pay)
+c.set_full_intent(reason="manual")
+st = c.report().get("limit_state")
+ok(bool(st) and st["state"] == "pending", "刚写完 -> pending", st)
+ok(c.report().get("limit_pending") is True, "report 暴露 pending 标记")
+ok("待生效" in c.charge_line(), "文案如实显示「待生效」而不是「已充满」", c.charge_line())
+ok("已生效" not in "".join(c.report()["advice"]), "建议里不宣称已生效",
+   c.report()["advice"])
+
+print("== 31. 电量越过上限 -> 判定已生效 ==")
+c, pay = fresh_mut(ASUS_80)
+c._lim_writer = mk_writer(pay)
+c.set_full_intent(reason="manual")
+c.feed(batt(ac=True, pct=100, charging=True, rate=-20.0), 45.0, 60.0)
+st = c.report().get("limit_state")
+ok(bool(st) and st["state"] == "synced", "电量到 100% -> synced", st)
+ok(c.report().get("limit_pending") is False, "确认后清掉 pending")
+ok("待生效" not in c.charge_line(), "文案恢复常态", c.charge_line())
+
+print("== 32. 被厂商服务回滚 -> 自动重写一次；再被改回 -> 认输 ==")
+c, pay = fresh_mut(ASUS_80)
+c._lim_writer = mk_writer(pay)
+c.set_full_intent(reason="manual")
+ok(pay["value"] == 100, "前置：已写成 100%", pay["value"])
+pay["value"] = 80                       # 厂商服务把它改回去（实测发生过一次）
+c.feed(batt(ac=True, pct=79), 45.0, 60.0)
+ok(pay["value"] == 100, "发现被回滚 -> 自动重写一次", pay["value"])
+ok(c.report().get("limit_state", {}).get("state") == "pending", "重试期间仍是 pending")
+pay["value"] = 80                       # 又被改回去
+c.feed(batt(ac=True, pct=79), 45.0, 60.0)
+st = c.report().get("limit_state")
+ok(bool(st) and st["state"] == "rolled_back", "重试一次还被改回 -> rolled_back", st)
+ok(any("厂商服务" in a for a in c.report()["advice"]),
+   "如实告知用户改不动，而不是静默失败", c.report()["advice"])
+
+print("== 33. 确认窗口内电量始终没动 -> unconfirmed（不假装成功）==")
+c, pay = fresh_mut(ASUS_80)
+c._lim_writer = mk_writer(pay)
+c.set_full_intent(reason="manual")
+c._pending["deadline"] = time.time() - 1.0      # 窗口已过
+c.feed(batt(ac=True, pct=79), 45.0, 60.0)
+st = c.report().get("limit_state")
+ok(bool(st) and st["state"] == "unconfirmed", "超时未越线 -> unconfirmed", st)
+ok(any("还没看到生效" in a for a in c.report()["advice"]),
+   "提示里说清「可能没跟上」", c.report()["advice"])
+
+print("== 34. 需要提权 -> 记录成 need_admin，不写成已下发 ==")
+c, pay = fresh_mut(ASUS_80)
+c._lim_writer = (lambda v: {"ok": False, "need_admin": True,
+                            "reason": "写 HKLM 需要管理员权限"})
+c.set_full_intent(reason="manual")
+st = c.report().get("limit_state")
+ok(bool(st) and st["state"] == "need_admin", "权限不够 -> need_admin", st)
+ok(c.report().get("limit_pending") is False, "没写成功就不该有待生效标记")
+
+print("== 35. 待生效状态跨重启保留（否则重启后假装已生效）==")
+c, pay = fresh_mut(ASUS_80)
+c._lim_writer = mk_writer(pay)
+c.set_full_intent(reason="manual")
+p = c.data_path
+c2 = bc.BatteryCare({}, p, chg_reader=(lambda: dict(pay)))
+ok(c2.report().get("limit_pending") is True, "重启后 pending 仍在",
+   c2.report().get("limit_state"))
+ok(c2.intent_active() is True, "重启后充满意图仍在")
 
 print("\n结果：%d 通过 / %d 失败" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

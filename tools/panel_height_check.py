@@ -34,7 +34,10 @@ LONG_ADVICE = ("你常带出门（日均离电 6.0h）但上限只到 80% → �
 CARE_WORST = {
     "enabled": True, "score": 88, "advice": [LONG_ADVICE,
                                              "距上次满充校准已 45 天（周期 30 天）→ 该做一次完整充放来修正 SOC 漂移"],
-    "charge_line": "充电上限 80%（平衡模式）",
+    # 最长的一条：待生效文案 + 下面 JS 会再拼「本次允许充满（满充校准）…」
+    "charge_line": "充电上限：100%（已下发，待生效）",
+    "limit_state": {"value": 100, "state": "pending", "note": "已下发，等待 EC 生效"},
+    "limit_pending": True,
     "charge_limit": {"supported": True, "value": 80, "mode": "balanced",
                      "mode_cn": "平衡模式", "label": "充电上限 80%（平衡模式）",
                      "myasus": True},

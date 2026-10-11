@@ -105,6 +105,9 @@ class BatteryCare:
         self._intent = self._data.get("intent") or None
         self._last_calib = self._data.get("last_calib") or None
         self._lim_writer = None          # 测试注入用；None = 走 hw.set_asus_charge_limit
+        # 上限「已下发 / 待生效 / 未生效」：写入成功 ≠ EC 已生效（实测滞后 ~13min）
+        self._pending = self._data.get("limit_pending") or None
+        self._limit_state = self._data.get("limit_state") or None
         self._last_save = 0.0
         self._last_feed = 0.0
         self._relief_on = False
@@ -304,6 +307,8 @@ class BatteryCare:
 
         # 6) 顺带刷新华硕充电上限（60 s 节流，单次 0.03 ms）
         self._chg_tick()
+        # 7) 复查刚下发的上限（EC 有 ~13min 延迟，且可能被厂商服务回滚）
+        self._pending_tick(ac, pct)
 
         self._recompute(batt)
         self._save()
@@ -521,15 +526,91 @@ class BatteryCare:
         self._save(force=True)
         self._intent_reason = reason or "充满意图已结束"
 
-    def apply_limit(self, value: int) -> Dict:
-        """真正去写厂商充电上限。权限不够时返回 need_admin=True，由上层提请权。"""
+    def apply_limit(self, value: int, track: bool = True) -> Dict:
+        """真正去写厂商充电上限。权限不够时返回 need_admin=True，由上层提请权。
+
+        写完**不算成功**：2026-10-11 实测 EC 滞后约 13 分钟才改变充电行为，
+        期间还被厂商服务回滚过一次。所以写完只置为「待生效」，由
+        `_pending_tick` 在确认窗口内复查（电量是否越线 / 值是否被改回去）。
+        """
         try:
             if self._lim_writer is not None:
-                return dict(self._lim_writer(int(value)) or {})
-            return dict(_hw.set_asus_charge_limit(int(value)) or {})
+                res = dict(self._lim_writer(int(value)) or {})
+            else:
+                res = dict(_hw.set_asus_charge_limit(int(value)) or {})
         except Exception as e:
             return {"ok": False, "need_admin": False,
                     "reason": "写入通道异常: %r" % (e,)}
+        if track:
+            if res.get("need_admin"):
+                self._set_limit_state(int(value), "need_admin",
+                                      "需要管理员权限才能改（面板会提请权）")
+            elif res.get("ok"):
+                # 写进去之后注册表立刻就是新值，强制刷一次 —— 否则 charge_line
+                # 还按旧值渲染，会跟刚置的「待生效」状态对不上（文案自相矛盾）。
+                try:
+                    self._chg_tick(force=True)
+                except Exception:
+                    pass
+                self._start_pending(int(value))
+            else:
+                self._set_limit_state(int(value), "failed",
+                                      res.get("reason") or "写入被拒绝")
+        return res
+
+    # ------------------------------------------- 上限下发后的确认（2026-10-11）
+    def _start_pending(self, value: int) -> None:
+        self._pending = {"value": int(value), "retry": 0, "rollback": False,
+                         "deadline": time.time() + float(_hw.EC_CONFIRM_S)}
+        self._data["limit_pending"] = self._pending
+        self._set_limit_state(int(value), "pending", "已下发，等待 EC 生效")
+        self._save(force=True)
+
+    def _set_limit_state(self, value: int, state: str, note: str = "") -> None:
+        self._limit_state = {"value": int(value), "state": state, "note": note,
+                             "at": time.time()}
+        self._data["limit_state"] = self._limit_state
+
+    def _pending_tick(self, ac: bool, pct) -> None:
+        """确认窗口内的复查：被回滚就重写一次；到点还没生效就如实说出来。"""
+        p = self._pending
+        if not isinstance(p, dict):
+            return
+        target = int(p.get("value") or 0)
+        # 1) 行为确认：电量越过了目标上限 —— EC 真的接受了（最有说服力的证据）
+        try:
+            if pct is not None and float(pct) >= float(target) - 0.5:
+                self._limit_done(target, "synced", "已生效（电量已到 %d%% 以上）" % target)
+                return
+        except Exception:
+            pass
+        # 2) 被厂商服务改回去了：重试一次。只重试一次 —— 和厂商服务对打
+        #    没完没了，且用户可能本来就是在 MyASUS 里手动改的。
+        cur = self._chg_tick(force=True).get("value")
+        if isinstance(cur, int) and cur != target:
+            if int(p.get("retry") or 0) < 1:
+                p["retry"] = int(p.get("retry") or 0) + 1
+                p["rollback"] = True
+                self._data["limit_pending"] = p
+                try:
+                    self.apply_limit(target, track=False)
+                except Exception:
+                    pass
+                return
+            self._limit_done(target, "rolled_back",
+                             "厂商服务把上限改回 %d%%，改不动" % cur)
+            return
+        # 3) 窗口到了还没越线：值保住了，但不敢说 EC 一定吃了
+        if time.time() > float(p.get("deadline") or 0):
+            self._limit_done(target, "unconfirmed",
+                             "已下发但 %d 分钟内没看到电量变化，EC 可能没跟上"
+                             % int(_hw.EC_CONFIRM_S // 60))
+
+    def _limit_done(self, value: int, state: str, note: str) -> None:
+        self._pending = None
+        self._data["limit_pending"] = None
+        self._set_limit_state(value, state, note)
+        self._save(force=True)
 
     def restore_limit(self) -> Dict:
         """回到养护上限，并结束意图。"""
@@ -667,6 +748,23 @@ class BatteryCare:
                            "习惯判断该继续压低还是改回充满"
                            % (chg_v, chg.get("mode_cn") or "自定义"))
 
+        # ---- 下发失败要如实说，不能假装已经生效 ----
+        st = (self._limit_state or {}).get("state")
+        if st in ("unconfirmed", "rolled_back", "failed", "need_admin"):
+            note = (self._limit_state or {}).get("note") or ""
+            v = (self._limit_state or {}).get("value")
+            if st == "rolled_back":
+                adv.append("上次改充电上限被厂商服务改回去了（%s）→ 本程序不再重试，"
+                           "请在 MyASUS 里改；两边同时改会打架" % note)
+            elif st == "need_admin":
+                adv.append("改充电上限要管理员权限（%s）→ 面板上点按钮会弹一次 UAC，"
+                           "确认后即可" % note)
+            elif st == "failed":
+                adv.append("上次改充电上限失败：%s" % (note or "写入被拒绝"))
+            else:
+                adv.append("上次下发的上限 %s%% 还没看到生效（%s）→ 厂商服务可能要更久，"
+                           "也可直接在 MyASUS 里确认" % (v, note))
+
         # ---- 满充校准（电量计需要端点修正，长期不充满会漂移）----
         if self.calib_due() and not intent_on:
             n = self.calib_days_since()
@@ -702,6 +800,10 @@ class BatteryCare:
             # 华硕充电上限（只读镜像值）：{supported,value,mode,mode_cn,label,myasus}
             "charge_limit": chg,
             "charge_line": self.charge_line(),
+            # 下发后的生效状态：pending(待生效~15min) / synced / unconfirmed /
+            # rolled_back(被厂商服务改回) / need_admin / failed
+            "limit_state": dict(self._limit_state) if self._limit_state else None,
+            "limit_pending": bool(self._pending),
             # 按场景的充电上限策略（2026-10-11）
             "scene": self.scene(),
             "dc_h_day": (round(self.dc_h_day(), 2) if self.dc_h_day() >= 0 else None),
@@ -731,6 +833,10 @@ class BatteryCare:
         v = chg.get("value")
         if v is None:
             return "充电上限：未读到" + ("（MyASUS 已装，去设一次）" if chg.get("myasus") else "")
+        # 刚下发还没被 EC 确认：不能当成既成事实报给用户（实测滞后 ~13 分钟）
+        st = (self._limit_state or {}).get("state")
+        if st == "pending" and int(v) == int((self._limit_state or {}).get("value") or -1):
+            return "充电上限：%d%%（已下发，待生效）" % int(v)
         if v >= 100:
             return "充电上限：100%（满容量 · 无保护）"
         return "充电上限：%d%%（%s）" % (v, chg.get("mode_cn") or "自定义")

@@ -772,6 +772,10 @@ _CHARGE_MODE = {
     60: ("lifespan", "长效使用模式"),
 }
 
+# 写完注册表到 EC 真正改变充电行为的滞后（2026-10-11 实测约 13 分钟）。
+# 用「电量是否越过上限」确认，而不信注册表回读 —— 回读只能证明写进去了。
+EC_CONFIRM_S = 900.0
+
 
 def has_myasus() -> bool:
     """是否装了 MyASUS（ASUS PC Assistant 这个 Appx 包）——用于给建议时决定措辞"""
@@ -948,12 +952,22 @@ def set_asus_charge_limit(value: int) -> dict:
     PermissionError(13) ⇒ 调用方要能区分「不支持」与「权限不够」，后者需要
     **提权一次**（ShellExecute runas 自举，或用户在管理员终端跑一次）。
 
-    返回 {ok, before, after, need_admin, reason, key}
-      ok         : 写完回读 == 目标值
-      need_admin : True 表示「键在，但当前令牌写不了」——需要提请权
+    2026-10-11 二次实测：**写入真的生效**，但有两个坑，别被回读骗了 ——
+      1. **EC 有约 13 分钟延迟**：11:54 写完注册表，电量到 12:07 才开始越过
+         80% 往上爬。所以「写完回读 == 目标值」只能证明注册表被改了，
+         **证明不了 EC 已生效**，这里把它单独记成 ec_confirmed=False。
+      2. **中间被厂商服务回滚过一次**（12:05 短暂变回 80%，12:06 又回 100%），
+         所以调用方要在确认窗口内**复查**，发现被改回去要重写一次。
+
+    返回 {ok, before, after, need_admin, reason, key, ec_confirmed, confirm_after_s}
+      ok              : 注册表写完且回读 == 目标值（只代表写进去了）
+      ec_confirmed    : 恒 False —— EC 是否跟上必须由**电量行为**事后确认
+      confirm_after_s : 建议的复查时间（实测延迟 ~13min，取 15min 留余量）
+      need_admin      : True 表示「键在，但当前令牌写不了」——需要提请权
     """
     out = {"ok": False, "before": None, "after": None, "need_admin": False,
-           "reason": "", "key": None}
+           "reason": "", "key": None, "ec_confirmed": False,
+           "confirm_after_s": EC_CONFIRM_S}
     try:
         v = int(value)
     except Exception:

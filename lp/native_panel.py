@@ -898,12 +898,20 @@ class NativePanel:
                                (care.get("intent") or {}).get("reason"), "手动")
                     gtxt += " · 本次允许充满（%s）" % why
                     gcol = C_GREEN
-                elif cv >= 100:
-                    gtxt += " · 充电上限 100%"
-                    gcol = C_ORANGE if care.get("scene") == "desk" else C_SUB
                 else:
-                    gtxt += " · 充电上限 %d%%（%s）" % (cv, cl.get("mode_cn") or "自定义")
-                    gcol = C_ORANGE if care.get("scene") == "mobile" else C_GREEN
+                    # 刚下发还没被 EC 确认（实测滞后 ~13min）：不能显示成既成事实
+                    ls = (care.get("limit_state") or {}).get("state")
+                    if ls == "pending" and (care.get("limit_state") or {}).get(
+                            "value") == cv:
+                        gtxt += " · 充电上限 %d%%（待生效）" % cv
+                        gcol = C_SUB
+                    elif cv >= 100:
+                        gtxt += " · 充电上限 100%"
+                        gcol = C_ORANGE if care.get("scene") == "desk" else C_SUB
+                    else:
+                        gtxt += " · 充电上限 %d%%（%s）" % (
+                            cv, cl.get("mode_cn") or "自定义")
+                        gcol = C_ORANGE if care.get("scene") == "mobile" else C_GREEN
         elif bi.get("display_changed"):
             gtxt = "离电图形：AMD 核显 · 屏幕已降到 %d Hz" % (hz or 60)
             gcol = C_GREEN
