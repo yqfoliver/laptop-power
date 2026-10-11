@@ -12,10 +12,11 @@ WebView2Loader.dll（微软官方 loader，NuGet: Microsoft.Web.WebView2）。
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import sys
 import time
-from ctypes import wintypes, POINTER, byref, c_void_p, c_int, c_long, c_ulong
+from ctypes import wintypes, POINTER, byref, c_void_p, c_int, c_long, c_ulong, c_ulonglong
 
 _u = ctypes.WinDLL("user32", use_last_error=True)
 _k = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -227,6 +228,8 @@ class WebView2Panel:
         self._exiting = False
         self._data_dir = data_dir or os.path.join(
             os.environ.get("LOCALAPPDATA", "."), "LaptopPowerAuto", "webview2")
+        self._scale = 1.0        # 窗口实际采用的 DPI 缩放（可能被工作区压小）
+        self._clamped = False    # 内容高度是否已被工作区钳制（钳了让页面出滚动条）
 
     # ------------------------------------------------------------ 环境准备
     def _loader_path(self) -> str:
@@ -320,6 +323,7 @@ class WebView2Panel:
                 break
             scale = max(1.0, scale * min(avail_h / float(hh), avail_w / float(ww)))
             ww, hh = win_size(scale)
+        self._scale = scale      # 高度自适应要用同一套缩放换算 CSS px → 物理 px
 
         # 贴屏幕右下角：右缘贴工作区右边、底缘贴工作区底部。
         # SPI_GETWORKAREA (0x0030) 拿不到时退回 CW_USEDEFAULT。
@@ -489,6 +493,7 @@ class WebView2Panel:
             if g and g(ctrl, byref(wv)) == S_OK:
                 self.webview = wv.value
             self.ready = True
+            self._install_height_watch()
             self._navigate()
         except Exception as e:
             self._note = "控制器初始化异常 %r" % e
@@ -519,6 +524,121 @@ class WebView2Panel:
                 fn(self.webview, url)
             except Exception:
                 pass
+
+    # ------------------------------------------------------ 高度自适应
+    # vtable（0 起点含 IUnknown 三件套）：27=AddScriptToExecuteOnDocumentCreated
+    # 32=PostWebMessageAsJson 34=add_WebMessageReceived；
+    # EventArgs 上 4=TryGetWebMessageAsString。Navigate=5 已在别处验证过，
+    # 这几个下标与之同一张 vtable，顺序来自官方 ICoreWebView2 头文件。
+    _HEIGHT_SCRIPT = (
+        "(function(){var s=function(){try{var h=Math.ceil("
+        "document.documentElement.scrollHeight);"
+        "window.chrome.webview.postMessage("
+        "JSON.stringify({__panel_h:h}));}catch(e){}};"
+        "try{new ResizeObserver(function(){setTimeout(s,0);})"
+        ".observe(document.documentElement);}catch(e){"
+        "window.setInterval(s,1500);}"
+        "window.addEventListener('load',function(){setTimeout(s,50);});"
+        "setTimeout(s,50);})();")
+
+    def _install_height_watch(self) -> None:
+        """注入高度上报脚本 + 注册 WebMessageReceived。
+
+        网页(index.html)里也有一份上报逻辑；这里再注入一份是故意的双保险：
+        页面版带去重，注入版覆盖「其它页面/页面改动丢失」的情况，
+        宿主端有滞回，重复报无害。"""
+        if not self.webview:
+            return
+
+        @ctypes.WINFUNCTYPE(HRESULT, c_void_p, HRESULT, c_void_p)
+        def on_script_done(this, err, _id):
+            return S_OK
+
+        add = _vcall(self.webview, 27, HRESULT, [wintypes.LPCWSTR, c_void_p])
+        if add:
+            try:
+                add(self.webview, self._HEIGHT_SCRIPT,
+                    ctypes.cast(_com_object([on_script_done]), c_void_p))
+            except Exception:
+                pass
+
+        @ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_void_p)
+        def on_msg(this, _sender, args):
+            try:
+                get = _vcall(args, 4, HRESULT, [POINTER(c_void_p)])
+                s = c_void_p()
+                if get and get(args, byref(s)) == S_OK and s.value:
+                    raw = ctypes.wstring_at(s.value)
+                    _o.CoTaskMemFree(s)
+                    self._on_web_message(raw)
+            except Exception:
+                pass
+            return S_OK
+
+        reg = _vcall(self.webview, 34, HRESULT, [c_void_p, c_void_p])
+        if reg:
+            try:
+                token = c_ulonglong(0)
+                reg(self.webview,
+                    ctypes.cast(_com_object([on_msg]), c_void_p),
+                    ctypes.byref(token))
+            except Exception:
+                pass
+
+    def _on_web_message(self, text: str) -> None:
+        # 实测 WebView2 会把字符串消息再 JSON 编码一层（'"…"'），
+        # 页面自己又 stringify 了一层 —— 循环解到出 dict 为止。
+        d = text
+        for _ in range(3):
+            if not isinstance(d, str):
+                break
+            try:
+                d = json.loads(d)
+            except Exception:
+                return
+        if isinstance(d, dict):
+            h = d.get("__panel_h")
+            if isinstance(h, (int, float)) and 100 < h < 4000:
+                self._fit_height(int(h))
+
+    def _fit_height(self, css_h: int) -> None:
+        """按网页内容高度调整窗口，保持右下角锚点不动。
+
+        - 滞回 6 CSS px：内容行高抖动时不来回拉窗；
+        - 超出工作区就钳到工作区，并通知页面改出滚动条（而不是裁掉）。"""
+        if not self.hwnd:
+            return
+        work = RECT()
+        have_work = bool(_u.SystemParametersInfoW(0x0030, 0, byref(work), 0))
+        wr, cr = RECT(), RECT()
+        _u.GetWindowRect(self.hwnd, byref(wr))
+        _u.GetClientRect(self.hwnd, byref(cr))
+        vframe = (wr.bottom - wr.top) - (cr.bottom - cr.top)   # 标题栏+边框
+        scale = max(1.0, self._scale)
+        max_client = 1 << 30
+        if have_work:
+            max_client = max(200, (work.bottom - work.top) - vframe)
+        want = min(int(round(css_h * scale)), max_client)
+        cur = cr.bottom - cr.top
+        if abs(want - cur) < int(6 * scale):
+            return
+        clamped = int(round(css_h * scale)) > max_client
+        if clamped != self._clamped:
+            self._clamped = clamped
+            post = _vcall(self.webview, 32, HRESULT, [wintypes.LPCWSTR])
+            if post:
+                try:
+                    post(self.webview,
+                         '{"__panel_clamped":true}' if clamped
+                         else '{"__panel_clamped":false}')
+                except Exception:
+                    pass
+        new_wh = want + vframe
+        x = wr.left
+        y = wr.bottom - new_wh                      # 底缘贴住原位置
+        if have_work:
+            y = max(work.top, y)
+        _u.MoveWindow(self.hwnd, x, y, wr.right - wr.left, new_wh, True)
 
     # ------------------------------------------------------------ 对外
     def _pump_once(self, seconds: float) -> None:

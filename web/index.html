@@ -428,6 +428,11 @@ function renderCharge(care){
   bRst.className  = "btn" + ((!care.intent_active && cl.value<=tgt) ? " on" : "");
 
   let t = care.charge_line || ("充电上限 " + cl.value + "%");
+  // 下发失败/被回滚要显眼：这是「按钮按了但没用」的唯一可见信号
+  const LS = (care.limit_state||{}).state;
+  // 只改颜色不换 class：换 class 会带进 margin/white-space，把面板高度顶变
+  line.style.color = (LS==="rolled_back"||LS==="failed"||LS==="unconfirmed")
+    ? "var(--amber)" : "";
   if(care.intent_active){
     t += " · 本次允许充满（" + (CHG_REASON[(care.intent||{}).reason] || "手动") + "）"
        + " · 拔电用到 90% 以下自动结束";
@@ -619,6 +624,38 @@ document.getElementById("gpProbe").onclick = async ()=>{
 
 tick();
 setInterval(tick, 2000);
+
+/* ---- 高度自适应：把真实内容高度报给宿主窗口（WebView2 面板用）----
+   教训：窗口高度写死校准值 + body overflow:hidden = 内容一变高就被静默裁掉
+   （这个坑踩了三次）。改成每次渲染后报 scrollHeight，宿主按需调窗口高度。
+   浏览器里（无 chrome.webview）这段自动跳过。 */
+(function(){
+  if(!(window.chrome && window.chrome.webview)) return;
+  var last = -1;
+  window.__panelReportH = function(){
+    try{
+      var h = Math.ceil(document.documentElement.scrollHeight);
+      if(h !== last){
+        last = h;
+        window.chrome.webview.postMessage(JSON.stringify({__panel_h: h}));
+      }
+    }catch(e){}
+  };
+  try{
+    window.chrome.webview.addEventListener("message", function(e){
+      try{
+        var d = JSON.parse(e.data);
+        if(d && d.__panel_clamped) document.body.style.overflowY = "auto";
+      }catch(err){}
+    });
+  }catch(e){}
+  if(window.ResizeObserver){
+    new ResizeObserver(function(){ setTimeout(window.__panelReportH, 0); })
+        .observe(document.documentElement);
+  }
+  window.addEventListener("load", function(){ setTimeout(window.__panelReportH, 50); });
+  window.__panelReportH();
+})();
 
 /* UI 调试探针：URL 带 ?probe 时把内容真实底边写进标题，
    供 headless 流程测量「无滚动条」目标高度用，正常运行零开销。

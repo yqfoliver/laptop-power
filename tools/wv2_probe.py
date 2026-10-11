@@ -192,7 +192,7 @@ def main():
             # 持续泵消息（这是关键：不是泵 2 秒就撒手）
             deadline = time.time() + 40
             while time.time() < deadline and not stop.is_set():
-                panel._pump_wait(0.4)
+                panel._pump_once(0.05)
                 if panel.ready:
                     break
                 if panel.failed:
@@ -211,7 +211,7 @@ def main():
             # 就绪后继续泵 —— 渲染/输入都要靠这条循环
             _beat = [time.time()]
             while not stop.is_set():
-                panel._pump_wait(0.3)
+                panel._pump_once(0.05)
                 if time.time() - _beat[0] > 1.5:
                     _beat[0] = time.time()
                     log("  pump 存活  t=%.1fs" % (time.time() - T0))
