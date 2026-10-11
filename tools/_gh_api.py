@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import io
 import subprocess
 import urllib.error
 import urllib.request
@@ -25,11 +26,66 @@ import urllib.request
 UA = "laptop-power-release"
 
 
+_TOK_CACHE = {"v": None}
+
+
 def token() -> str:
-    """从本机 Git Credential Manager 取令牌（不落盘、不打印）。"""
-    out = subprocess.run(["git", "credential", "fill"],
-                         input="protocol=https\nhost=github.com\n\n",
-                         capture_output=True, text=True, timeout=60).stdout or ""
+    """取令牌（带缓存）。
+
+    GCM 偶尔返回空（尤其并发/刚被卡住过一次时），而每个请求都去取一次的话，
+    中途取到空就会 401 —— 整棵树推到一半失败。取一次就缓存住。
+    """
+    if _TOK_CACHE["v"]:
+        return _TOK_CACHE["v"]
+    v = _token_once()
+    if not v:                      # 空值不缓存，下个请求再试一次
+        return ""
+    _TOK_CACHE["v"] = v
+    return v
+
+
+def _token_once() -> str:
+    """真正去 GCM 取一次；GCM 会间歇性返回空（刷新令牌时出网被拦），重试几次。"""
+    for _i in range(3):
+        v = _token_ask()
+        if v:
+            return v
+        import time as _t
+        _t.sleep(2.0)
+    return ""
+
+
+def _token_ask() -> str:
+    """从本机 Git Credential Manager 取令牌（不落盘、不打印）。
+
+    用**临时文件中转**而不是管道：git credential 会拉起 GCM 子进程，
+    子进程继承管道句柄 —— 父进程超时被杀后管道仍不关闭，`capture_output`
+    会永久阻塞在 read() 上（实测：60s timeout 形同虚设，脚本挂十几分钟）。
+    重定向到文件就没有这个问题。
+    """
+    import tempfile
+    fd_in, pin = tempfile.mkstemp(prefix="ghcred_in_")
+    fd_out, pout = tempfile.mkstemp(prefix="ghcred_out_")
+    try:
+        with os.fdopen(fd_in, "w") as f:
+            f.write("protocol=https\nhost=github.com\n\n")
+        with open(pin, "r") as fi, open(pout, "w") as fo:
+            try:
+                subprocess.run(["git", "credential", "fill"],
+                               stdin=fi, stdout=fo, stderr=subprocess.DEVNULL,
+                               timeout=45)
+            except Exception:
+                pass
+        try:
+            out = io.open(pout, "r", encoding="utf-8", errors="ignore").read()
+        except Exception:
+            out = ""
+    finally:
+        for p in (pin, pout):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
     for line in out.splitlines():
         if line.startswith("password="):
             return line[len("password="):].strip()
@@ -97,8 +153,24 @@ def _via_curl(method, url, tok, data, headers, timeout):
 
 
 def request(method, url, tok=None, data=None, headers=None,
-            timeout=90):
-    """发一个 REST 请求，返回 (status, body_bytes)。status=0 表示两个通道都失败。"""
+            timeout=90, tries=3):
+    """发一个 REST 请求，返回 (status, body_bytes)。status=0 表示两个通道都失败。
+
+    带重试（2026-10-11）：这个环境的出网通道会毫无征兆地翻脸——urllib 突然
+    SSL UNEXPECTED_EOF、curl 突然 Connection aborted，过几秒又都好了。
+    一次失败就判死的话，整棵树要上传几十个文件时几乎必然中途失败。
+    """
+    st, body = 0, b""
+    for _i in range(max(1, int(tries))):
+        st, body = _once(method, url, tok, data, headers, timeout)
+        if st:
+            return st, body
+        import time as _t
+        _t.sleep(2.0 + 2.0 * _i)
+    return st, body
+
+
+def _once(method, url, tok, data, headers, timeout):
     st, body = 0, b""
     try:
         st, body = _via_urllib(method, url, tok, data, headers, timeout)
