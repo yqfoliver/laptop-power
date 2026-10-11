@@ -890,12 +890,20 @@ class NativePanel:
             cl = care.get("charge_limit") or {}
             cv = cl.get("value")
             if cv is not None:
-                if cv >= 100:
-                    gtxt += " · 充电上限 100%（无保护）"
-                    gcol = C_ORANGE
+                # 按场景养护（2026-10-11）：充满意图激活时明确显示「本次允许充满」，
+                # 否则充电上限的措辞随场景走 —— 长期插电压低是对的，常带出门不是。
+                if care.get("intent_active"):
+                    why = {"manual": "手动", "travel": "要出门",
+                           "calibrate": "满充校准"}.get(
+                               (care.get("intent") or {}).get("reason"), "手动")
+                    gtxt += " · 本次允许充满（%s）" % why
+                    gcol = C_GREEN
+                elif cv >= 100:
+                    gtxt += " · 充电上限 100%"
+                    gcol = C_ORANGE if care.get("scene") == "desk" else C_SUB
                 else:
                     gtxt += " · 充电上限 %d%%（%s）" % (cv, cl.get("mode_cn") or "自定义")
-                    gcol = C_GREEN
+                    gcol = C_ORANGE if care.get("scene") == "mobile" else C_GREEN
         elif bi.get("display_changed"):
             gtxt = "离电图形：AMD 核显 · 屏幕已降到 %d Hz" % (hz or 60)
             gcol = C_GREEN

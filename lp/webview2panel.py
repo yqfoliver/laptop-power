@@ -39,9 +39,13 @@ PANEL_W = 560
 # 提到 444 并配合 body overflow:hidden 双保险。
 # 2026-10-10：新增「核显优先」卡片（84px），实测 wrap 底边 496 / 文档
 # scrollHeight 506 ⇒ 再提到 512，同样用探针量过（tools/panel_height_check.py）。
+# 2026-10-11：电池卡新增「充电上限」行 + 「本次充满 / 回养护」按钮（按场景养护）。
+# 用**最长文案**量的（意图激活 + 校准到期 + mobile 场景长建议）：wrap 底边 591、
+# 文档 601 → 定 604。注意 mock 要填进 battery_info.care（面板取的是
+# state.battery_info），填顶层测出来会偏乐观 49px。
 # 教训复述：网页每加一行都要重量一次，body overflow:hidden 会**裁掉**溢出
 # 内容而不是出滚动条，静默丢信息比滚动条更糟。
-PANEL_H = 528
+PANEL_H = 604
 
 HRESULT = c_long
 S_OK = 0

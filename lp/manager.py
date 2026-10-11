@@ -1525,6 +1525,50 @@ class Manager:
             pass
         return self.gpupick_report()
 
+    # ------------------------------------------- 充电上限：「本次充满 / 回养护」
+    def charge_limit_set(self, action: str = "full", reason: str = "manual") -> dict:
+        """面板按钮入口。full=本次充满 / restore=回养护上限 / clear=只结束意图。
+
+        写入 HKLM 需要管理员，常驻进程没有 ⇒ 被拒时用 ShellExecute(runas) 把
+        自己再拉起来一次（弹一次 UAC）。**返回值必须如实区分三种结果**：
+        已生效 / 已发起提权（等用户点 UAC）/ 失败，否则面板会给出假反馈。
+        """
+        care = getattr(self, "care", None)
+        if care is None or not getattr(care, "enabled", True):
+            return {"ok": False, "msg": "电池养护未启用"}
+        try:
+            if action == "restore":
+                r = care.restore_limit()
+                w = r.get("write") or {}
+                if w.get("ok"):
+                    return {"ok": True, "msg": "已回到养护上限 %d%%" % care.target_limit}
+                return self._chg_limit_result(w, care.target_limit, "回养护")
+            if action == "clear":
+                care.clear_intent("手动结束充满意图")
+                return {"ok": True, "msg": "已结束本次充满"}
+            r = care.set_full_intent(reason=reason if reason in (
+                "manual", "travel", "calibrate") else "manual")
+            w = r.get("write") or {}
+            if w.get("ok"):
+                return {"ok": True, "msg": "已切到 %d%%，本次允许充满" % care.full_limit}
+            return self._chg_limit_result(w, care.full_limit, "充满")
+        except Exception as e:
+            return {"ok": False, "msg": "充电上限操作失败：%r" % (e,)}
+
+    def _chg_limit_result(self, w: dict, value: int, what: str) -> dict:
+        """写入没成功时：能提权就提请权，不能就让用户去 MyASUS。"""
+        if w.get("need_admin"):
+            from . import hw as _hwm
+            if _hwm.elevate_self("--set-charge-limit %d" % value):
+                return {"ok": True, "elevating": True,
+                        "msg": "已请求管理员权限，请在 UAC 里确认（确认后自动切换）"}
+            return {"ok": False, "elevating": False,
+                    "msg": "提权失败（UAC 被取消？）。也可自己去 MyASUS → 设备设置 → "
+                           "电池健康充电 切换"}
+        return {"ok": False, "elevating": False,
+                "msg": (w.get("reason") or "写入失败") +
+                       "。可去 MyASUS → 设备设置 → 电池健康充电 手动切换"}
+
     def gpupick_probe_start(self, seconds: float = 45.0) -> dict:
         """对当前前台程序发起「试试核显」试探。"""
         try:

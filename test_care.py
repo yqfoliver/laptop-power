@@ -338,5 +338,141 @@ c.reload_cfg({"care_thermal_relief": True})
 c.feed(batt(ac=True, charging=False, pct=100), 96.0, 60.0)
 ok(len(pc.writes()) == 1, "热重载打开后恢复动作")
 
+# ==================================================================
+# 26~30：按场景的充电上限 + 「本次充满」意图（2026-10-11）
+# 用户反馈「养护模式就只能 80%，不能充满，不合理」→ 养护改成按场景，
+# 并允许一次有期限的「充满」，而不是一个永久开关。
+# ==================================================================
+ASUS_80 = {"supported": True, "value": 80, "mode": "balanced",
+           "mode_cn": "平衡模式", "label": "充电上限 80%", "myasus": True}
+ASUS_100 = dict(ASUS_80, value=100, mode="full", mode_cn="满容量模式",
+                label="充电上限 100%")
+
+def seed_days(c, n=7, dc_h=6.0, ac_h=18.0, full_h=0.0):
+    """直接造 n 天统计样本。
+
+    不能用 feed(大 dt) 造：feed 会把 dt 夹到 300 s（防休眠后虚增统计），
+    一次喂 6 小时只会被记成 5 分钟。
+    """
+    import datetime
+    days = c._data.setdefault("days", {})
+    today = datetime.date.today()
+    for i in range(n):
+        k = (today - datetime.timedelta(days=i)).isoformat()
+        days[k] = {"sample_s": (dc_h + ac_h) * 3600.0, "ac_s": ac_h * 3600.0,
+                   "dc_s": dc_h * 3600.0, "full_soc_s": full_h * 3600.0,
+                   "hot_charge_s": 0.0, "deep_s": 0.0, "charge_wh": 0.0,
+                   "discharge_wh": 0.0, "relief_s": 0.0, "max_heat_c": 0.0,
+                   "intent_full_s": 0.0}
+    return c
+
+
+print("== 26. 场景判定：长期插电 desk / 常带出门 mobile ==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+ok(c.scene() == "unknown", "刚建档样本不足 -> unknown", c.scene())
+
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+seed_days(c, dc_h=0.5, ac_h=10.0)
+c._recompute({})
+ok(c.scene() == "desk", "日均离电 0.5h -> desk", (c.scene(), c.dc_h_day()))
+adv = c.report()["advice"]
+ok(any("长期插电" in a for a in adv), "desk 场景给「保持/压低」的结论", adv)
+ok(not any("白砍" in a for a in adv), "desk 场景不会劝你充满", adv)
+
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+seed_days(c, dc_h=6.0, ac_h=2.0)
+c._recompute({})
+ok(c.scene() == "mobile", "日均离电 6h -> mobile", (c.scene(), c.dc_h_day()))
+adv = c.report()["advice"]
+ok(any("白砍" in a for a in adv), "mobile + 上限 80% -> 劝你改回 100%", adv)
+ok(not any("建议压到 80%" in a for a in adv), "mobile 场景不再念叨压到 80%", adv)
+
+print("== 27. mobile 场景不再念叨「满充搁置去设上限」==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_100)
+seed_days(c, dc_h=6.0, ac_h=2.0, full_h=2.0)     # 每天满充搁置 2h
+c._recompute({})
+adv = c.report()["advice"]
+ok(c.scene() == "mobile", "样本判定为 mobile", c.scene())
+# 注意别用 "满充搁置" 做断言：无坏习惯时的兜底语是「无明显满充搁置 / 高温充电 / 深放」，
+# 它会永远命中。真正的唠叨语带「满充搁置日均」。
+ok(not any("满充搁置日均" in a for a in adv),
+   "常带出门的人满充是刚需，不当坏习惯唠叨", adv)
+
+print("== 28. 「本次充满」意图：有期限、会自动结束 ==")
+writes = []
+
+
+def fake_writer(v):
+    writes.append(v)
+    return {"ok": True, "before": 80, "after": v, "need_admin": False,
+            "reason": "", "key": "fake"}
+
+
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+c._lim_writer = fake_writer
+r = c.set_full_intent(reason="travel")
+ok(r["ok"] and writes == [100], "设意图时立刻去写 100%", writes)
+ok(c.intent_active() is True, "意图已激活")
+# 意图期间的满充不扣分
+c.feed(batt(ac=True, pct=100), 45.0, 7200.0)
+b = c.report()["today"]
+ok(b.get("full_soc_s", 0) == 0, "意图期间的满充不计入满充搁置", b)
+ok(b.get("intent_full_s", 0) >= 300.0, "改记到 intent_full_s", b)
+# 拔电用掉 -> 自动结束
+c.feed(batt(ac=False, discharging=True, pct=70, rate=20.0), 45.0, 60.0)
+ok(c.intent_active() is False, "拔电用到 90% 以下 -> 意图自动结束")
+ok(writes[-1] == 100, "结束时不会偷偷改回上限（改回要用户或场景触发）", writes)
+
+print("== 29. 意图有效期下限 + 到期自动结束（忘了清也不会永远停在 100%）==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+c._lim_writer = fake_writer
+r = c.set_full_intent(reason="manual", hours=0.001)
+span = r["intent"]["expire"] - r["intent"]["created"]
+ok(span >= 1800.0 - 1.0, "有效期有 0.5h 下限（防止手滑设成几秒）", span)
+c.feed(batt(ac=True, pct=100), 45.0, 10.0)
+ok(c.intent_active() is True, "有效期内仍在")
+c._intent["expire"] = c._intent["created"] - 1.0     # 直接把过期时间拨到过去
+c._data["intent"] = c._intent
+c.feed(batt(ac=True, pct=100), 45.0, 10.0)
+ok(c.intent_active() is False, "过期自动结束", c.report().get("intent"))
+ok(c.report().get("intent") is None, "结束后 report 里不再带意图")
+
+print("== 30. 写入权限分流：权限不够要报 need_admin 而不是假装成功 ==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+
+
+def denied_writer(v):
+    return {"ok": False, "before": 80, "after": 80, "need_admin": True,
+            "reason": "写 HKLM 需要管理员权限", "key": "fake"}
+
+
+c._lim_writer = denied_writer
+r = c.set_full_intent(reason="manual")
+ok(r["write"].get("need_admin") is True, "被拒时返回 need_admin=True", r["write"])
+ok(c.intent_active() is True,
+   "写入失败也保留意图（用户提权成功后仍能继续，且满充不误扣分）")
+c.restore_limit()
+ok(True, "restore_limit 走养护上限（target_limit）")
+
+print("== 31. 满充校准提醒 ==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+ok(c.calib_due() is True, "从未校准 -> 该提醒")
+adv = c.report()["advice"]
+ok(any("还没做过满充校准" in a for a in adv), "首次给校准建议", adv)
+c._last_calib = c._day_key()
+c._data["last_calib"] = c._last_calib
+ok(c.calib_due() is False, "刚校准过 -> 不提醒")
+ok(c.calib_days_since() == 0, "距上次 0 天", c.calib_days_since())
+c._last_calib = "2020-01-01"
+ok(c.calib_due() is True and c.calib_days_since() > 1000,
+   "很久没校准 -> 提醒", c.calib_days_since())
+# calibrate 意图完成后要记下校准日期
+c2, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+c2._lim_writer = fake_writer
+c2.set_full_intent(reason="calibrate")
+c2.feed(batt(ac=False, discharging=True, pct=60, rate=20.0), 45.0, 60.0)
+ok(c2.calib_due() is False and c2.calib_days_since() == 0,
+   "校准意图走完一轮 -> 记下校准日期", c2.calib_days_since())
+
 print("\n结果：%d 通过 / %d 失败" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

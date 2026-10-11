@@ -104,6 +104,15 @@ DEFAULT_CONFIG = {
     "care_heat_relief": True,            # 充电高热时临时压低 AC 侧 CPU 上限降温
     "care_heat_relief_cpu_pct": 70,      # 降温期间的 AC CPU 上限（%）
     "care_heat_relief_clear_c": 82,      # 温度回落到此值以下即还原
+    # --- 按场景的充电上限（2026-10-11）：养护不该是「永远 80%」---
+    # 长期插电才需要压低上限；常带出门时 100% 更划算。另外电量计需要周期性
+    # 满充校准，所以「有目的的满充」不再算坏习惯。
+    "care_target_limit_pct": 80,         # 养护上限（长期插电时的目标）
+    "care_full_limit_pct": 100,          # 「本次充满」的目标上限
+    "care_calibrate_days": 30,           # 满充校准提醒周期（天）
+    "care_full_intent_h": 24.0,          # 「本次充满」意图的有效期（小时，超时自动结束）
+    "care_mobile_dc_h_day": 1.0,         # 日均离电 ≥ 此值判为「常带出门」
+    "care_scene_days": 7,                # 场景判定的回看天数
 
     # ---------------- 合盖不休眠 / 常驻瘦身（2026-10-06 新增，对标 G-Helper） ----------------
     # 笔记本接外接显示器当台式机用时，Windows 默认合盖即睡眠。开启后：检测到

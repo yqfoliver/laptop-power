@@ -95,6 +95,23 @@ def main(argv=None) -> int:
         print("  取值来源     %s" % ("、".join(s.get("sources") or []) or "通用兜底"))
         return 0
 
+    # ------------------------------------------------- 提权改充电上限（自举目标）
+    # 常驻进程是普通权限，写华硕的 HKLM 充电上限会被拒。面板点「本次充满」时，
+    # 用 ShellExecute(runas) 把**自己**再拉起来一次并带这个参数：UAC 确认后
+    # 在管理员进程里写一次就退出。主进程始终保持普通权限、保持静默。
+    if "--set-charge-limit" in argv:
+        try:
+            v = int(argv[argv.index("--set-charge-limit") + 1])
+        except Exception:
+            print("用法：--set-charge-limit 60|80|100")
+            return 2
+        r = hw.set_asus_charge_limit(v)
+        print("充电上限：%s%% -> %s%%" % (r.get("before"), r.get("after")))
+        print("结果：%s" % ("成功" if r.get("ok") else (r.get("reason") or "失败")))
+        if not r.get("ok") and r.get("need_admin"):
+            print("（权限不足：本参数需要以管理员身份运行）")
+        return 0 if r.get("ok") else 3
+
     if "--selftest" in argv:
         print("管理员权限：%s" % diagnose.is_admin())
         print("系统计划：%s" % pc.list_schemes())

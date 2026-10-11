@@ -166,6 +166,13 @@
     <div class="row" style="margin:2px 0 0">
       <span class="hint" id="battHw">—</span>
     </div>
+    <div class="row" style="margin:3px 0 0">
+      <span class="hint" id="chgLine">—</span>
+    </div>
+    <div class="fanbtns" id="chgBtns" style="margin-top:4px">
+      <button class="btn" id="chgFull">本次充满</button>
+      <button class="btn" id="chgRestore">回养护</button>
+    </div>
     <div class="okline" id="battOk" style="margin-top:3px"></div>
     <div class="advline" id="battAdv"></div>
   </div>
@@ -349,6 +356,8 @@ function renderBatt(){
   if(!state.ac) hw += (hw?" · ":"") + "核显模式";
   document.getElementById("battHw").textContent = hw;
 
+  renderCharge(care);
+
   const ok = document.getElementById("battOk");
   const adv = document.getElementById("battAdv");
   const cl = (care.charge_limit)||{};
@@ -394,6 +403,53 @@ function renderBatt(){
   }
   ok.textContent = okText;
   adv.textContent = advText;
+}
+
+// 充电上限：养护不该是「永远 80%」——要带出门 / 该做满充校准时，充满是对的。
+// 所以这里给的是一次**有期限**的「本次充满」，而不是一个把养护关掉的永久开关。
+const CHG_REASON = {manual:"手动", travel:"要出门", calibrate:"满充校准"};
+function renderCharge(care){
+  const line = document.getElementById("chgLine");
+  const btns = document.getElementById("chgBtns");
+  const bFull = document.getElementById("chgFull");
+  const bRst = document.getElementById("chgRestore");
+  if(!line || !btns) return;
+  const cl = care.charge_limit || {};
+  if(!cl.supported || cl.value==null){
+    // 读不到厂商接口：按钮点了也没用，直接收起来，别摆一排死按钮
+    btns.style.display = "none";
+    line.textContent = care.enabled ? "充电上限：本机型读不到厂商接口" : "";
+    return;
+  }
+  btns.style.display = "";
+  const tgt = care.target_limit || 80;
+  bRst.textContent = "回养护 " + tgt + "%";
+  bFull.className = "btn" + (care.intent_active ? " on" : "");
+  bRst.className  = "btn" + ((!care.intent_active && cl.value<=tgt) ? " on" : "");
+
+  let t = care.charge_line || ("充电上限 " + cl.value + "%");
+  if(care.intent_active){
+    t += " · 本次允许充满（" + (CHG_REASON[(care.intent||{}).reason] || "手动") + "）"
+       + " · 拔电用到 90% 以下自动结束";
+  }else{
+    const SC = {desk:"长期插电", mobile:"常带出门", unknown:"习惯判定中"};
+    const scn = SC[care.scene];
+    if(scn) t += " · " + scn;
+    if(care.calib_due) t += " · 该做满充校准了";
+  }
+  line.textContent = t;
+}
+
+async function chgSet(act){
+  const line = document.getElementById("chgLine");
+  try{
+    const r = await post("/api/charge_limit",{action:act});
+    // 反馈必须如实：提权是「已发起」，不是「已生效」
+    line.textContent = (r && r.msg) ? r.msg : (r && r.ok ? "已生效" : "操作失败");
+    tick();
+  }catch(e){
+    line.textContent = "操作失败：" + ((e&&e.message)||e);
+  }
 }
 
 function renderLoad(){

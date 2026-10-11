@@ -941,6 +941,99 @@ def asus_charge_limit() -> dict:
     return out
 
 
+def set_asus_charge_limit(value: int) -> dict:
+    """写华硕充电上限（只接受 60 / 80 / 100）。
+
+    2026-10-11 实测：常驻程序是普通权限，`OpenKey(KEY_SET_VALUE)` 直接
+    PermissionError(13) ⇒ 调用方要能区分「不支持」与「权限不够」，后者需要
+    **提权一次**（ShellExecute runas 自举，或用户在管理员终端跑一次）。
+
+    返回 {ok, before, after, need_admin, reason, key}
+      ok         : 写完回读 == 目标值
+      need_admin : True 表示「键在，但当前令牌写不了」——需要提请权
+    """
+    out = {"ok": False, "before": None, "after": None, "need_admin": False,
+           "reason": "", "key": None}
+    try:
+        v = int(value)
+    except Exception:
+        out["reason"] = "参数不是整数"
+        return out
+    if v not in (60, 80, 100):
+        out["reason"] = "华硕只支持 60 / 80 / 100 三档"
+        return out
+
+    out["before"] = asus_charge_limit().get("value")
+
+    target = None
+    for hive, path, name in _ASUS_CHARGE_KEYS:
+        try:
+            h = winreg.OpenKey(hive, path, 0, winreg.KEY_READ)
+            winreg.QueryValueEx(h, name)
+            winreg.CloseKey(h)
+            target = (hive, path, name)
+            break
+        except Exception:
+            continue
+    if target is None:
+        out["reason"] = "没找到充电上限键（非华硕机型或驱动未装）"
+        return out
+
+    hive, path, name = target
+    out["key"] = path + "\\" + name
+    try:
+        h = winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE)
+    except PermissionError:
+        out["need_admin"] = True
+        out["reason"] = "写 HKLM 需要管理员权限"
+        return out
+    except Exception as e:
+        out["reason"] = "打开键失败: %r" % (e,)
+        return out
+    try:
+        winreg.SetValueEx(h, name, 0, winreg.REG_DWORD, v)
+    except Exception as e:
+        out["reason"] = "写入失败: %r" % (e,)
+        return out
+    finally:
+        try:
+            winreg.CloseKey(h)
+        except Exception:
+            pass
+
+    out["after"] = asus_charge_limit().get("value")
+    out["ok"] = (out["after"] == v)
+    if not out["ok"]:
+        out["reason"] = "写完回读为 %s，可能被华硕服务回滚" % (out["after"],)
+    return out
+
+
+def elevate_self(args: str) -> bool:
+    """用 ShellExecute(runas) 把自己再拉起来一次，UAC 确认后拿到管理员权限。
+
+    为什么需要：常驻程序必须静默（不能开机就弹 UAC），但改 HKLM 一定要管理员。
+    所以「改充电上限」做成**按需提权的一次性动作**——用户点按钮才弹一次，
+    并且是拉起一个只做这一件事就退出的短进程，主进程本身仍然普通权限。
+
+    args 会拼到命令行上；返回 True 只表示「已成功发起」（用户可能在 UAC 上点否）。
+    """
+    try:
+        import ctypes
+        import sys
+        exe = sys.executable or ""
+        base = os.path.basename(exe).lower()
+        if base.startswith("python"):                    # 源码运行：补上 main.py
+            script = os.path.abspath(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "main.py"))
+            cmd = '"%s" %s' % (script, args)
+        else:                                            # 打包后的 exe
+            cmd = args
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, cmd, None, 1)
+        return int(rc) > 32
+    except Exception:
+        return False
+
+
 # ------------------------------------------------------------- 硬件信息
 def system_info() -> dict:
     info = {"cpu": "", "gpus": [], "model": "", "manufacturer": ""}

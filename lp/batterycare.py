@@ -28,6 +28,28 @@ r"""电池充放电管理（锂电老化三大应力：满充搁置 / 高温 / �
    非管理员写 HKLM 被拒。⇒ 设定动作必须由用户在 MyASUS 里完成一次，
    程序负责「读到 → 展示 → 不再重复唠叨」。
 
+================================================================ 为什么不能「永远 80%」
+（2026-10-11 用户反馈：养护模式就只能充到 80% 吗，不能全充满，不合理）
+
+80% 上限是有**适用场景**的，不是一条普适真理。它只在一种情形下划算：
+「长期插电不拔、很少用到电池」——此时满电搁置是唯一的老化源，压到 60~80%
+能显著延长寿命。反过来，如果你**经常带出门**，80% 上限等于白砍掉 20% 续航，
+换来的寿命收益远小于每天少 1/5 电量的代价。
+
+另外两点被一刀切 80% 忽略的事实：
+1) **电量计需要满充校准**。BMS 的库仑计靠满充/满放端点修正 SOC 漂移，长期
+   不充满会出现「显示 30% 突然关机」「一直停在 99%」。厂商普遍建议每 1~2 个
+   月做一次完整充放循环。所以「有目的的满充」不是坏习惯，**无意义的满充搁置**
+   才是。
+2) **耗时的时机**。满电后立刻拔掉使用，与满电后插着放三天，两者老化差一个量级。
+
+⇒ 本模块的立场从「永远建议 80%」改为**按场景**：
+   · desk（长期插电）    → 建议 60/80%
+   · mobile（常带出门）  → 100% 是合理的，只在长期插电那几天临时压低
+   · 校准到期（默认 30 天没做过满充）→ 主动建议做一次满充校准
+并且引入「本次充满」意图：意图激活期间的满充**不计入扣分**（有目的的满充
+不是坏习惯），带出去用过之后意图自动结束并提示切回养护上限。
+
 ================================================================ 本机能拿到什么
 · 电量 %、充/放电状态、充放电功率、健康度、循环数 —— ACPI 电池接口（已有）
 · 电池温度 —— **本机不支持**（IOCTL_BATTERY_QUERY_INFORMATION level=2 失败，
@@ -79,6 +101,10 @@ class BatteryCare:
         self._scheme_ok_val = False
         self._load_params()
         self._data = self._load()
+        # 「本次充满」意图 + 上次满充校准日期（跨重启保留，否则每次重启都失忆）
+        self._intent = self._data.get("intent") or None
+        self._last_calib = self._data.get("last_calib") or None
+        self._lim_writer = None          # 测试注入用；None = 走 hw.set_asus_charge_limit
         self._last_save = 0.0
         self._last_feed = 0.0
         self._relief_on = False
@@ -139,6 +165,13 @@ class BatteryCare:
         self.hot_cpu_c = float(c.get("care_hot_cpu_c", 95))
         self.thermal_clear_c = float(c.get("care_thermal_clear_c", 89))
         self.thermal_cap = int(c.get("care_thermal_cpu_pct", 80))
+        # ---- 按场景的充电上限（2026-10-11）----
+        self.target_limit = int(c.get("care_target_limit_pct", 80))    # 养护上限
+        self.full_limit = int(c.get("care_full_limit_pct", 100))       # 充满
+        self.calib_days = int(c.get("care_calibrate_days", 30))        # 校准周期
+        self.intent_h = float(c.get("care_full_intent_h", 24.0))       # 意图有效期
+        self.mobile_dc_h = float(c.get("care_mobile_dc_h_day", 1.0))   # 日均离电≥此值=常带出门
+        self.scene_days = int(c.get("care_scene_days", 7))             # 场景回看天数
 
     def reload_cfg(self, cfg: Optional[Dict] = None):
         if cfg is not None:
@@ -193,7 +226,9 @@ class BatteryCare:
         if not isinstance(b, dict):
             b = {"full_soc_s": 0.0, "hot_charge_s": 0.0, "deep_s": 0.0,
                  "charge_wh": 0.0, "discharge_wh": 0.0, "sample_s": 0.0,
-                 "relief_s": 0.0, "max_heat_c": 0.0}
+                 "relief_s": 0.0, "max_heat_c": 0.0,
+                 # 场景判定要区分插电/离电时长；intent_full_s 是「有目的的满充」
+                 "ac_s": 0.0, "dc_s": 0.0, "intent_full_s": 0.0}
             days[key] = b
         return b
 
@@ -223,6 +258,10 @@ class BatteryCare:
         b["sample_s"] = b.get("sample_s", 0.0) + dt
         pct = batt.get("percent")
         ac = bool(batt.get("ac"))
+        # 插电/离电时长：场景判定（desk / mobile）的唯一依据
+        b["ac_s" if ac else "dc_s"] = b.get("ac_s" if ac else "dc_s", 0.0) + dt
+        # 意图过期 / 已带出去用过 → 自动结束（不等用户回来手动清）
+        self._intent_tick(ac, pct)
         charging = bool(batt.get("charging"))
         discharging = bool(batt.get("discharging"))
         rate = batt.get("rate_w")
@@ -230,8 +269,11 @@ class BatteryCare:
             b["max_heat_c"] = max(b.get("max_heat_c", 0.0), float(heat_c))
 
         # 1) 满充搁置：插电 + 电量 ≥ full_soc（最伤电池的一条）
+        #    「本次充满」意图激活期间**不扣分**——有目的的满充不是坏习惯，
+        #    坏的是无意义的满充搁置。单独计到 intent_full_s 便于事后核对。
         if ac and pct is not None and pct >= self.full_soc:
-            b["full_soc_s"] = b.get("full_soc_s", 0.0) + dt
+            key = "intent_full_s" if self.intent_active() else "full_soc_s"
+            b[key] = b.get(key, 0.0) + dt
 
         # 2) 充电高热：充电中 + 机身热负荷高（电池温度本机不可读，用热区代理）
         hot = False
@@ -424,6 +466,109 @@ class BatteryCare:
         self.relief_off(reason="切档/电源变化，还原 CPU 上限")
         self.forget_scheme()
 
+    # ------------------------------------------- 「本次充满」意图（2026-10-11）
+    # 养护不该是一刀切的 80%：要带出门 / 该做满充校准时，充满是对的。这里把
+    # 「充满」做成一次**有期限、会自动结束**的意图，而不是一个永久开关 ——
+    # 永久开关等于把养护关掉，那才是真的没保护了。
+    def intent_active(self) -> bool:
+        it = self._intent
+        if not isinstance(it, dict):
+            return False
+        try:
+            return float(it.get("expire") or 0) > time.time()
+        except Exception:
+            return False
+
+    def _intent_tick(self, ac: bool, pct) -> None:
+        """意图的自动结束：过期，或「已经带出去用过了」（离电且电量掉到 90% 以下）。
+
+        不留给用户手动清——忘了清就永远停在 100%，养护等于白设。
+        """
+        if not isinstance(self._intent, dict):
+            return
+        if not self.intent_active():
+            self.clear_intent("充满意图到期，已自动结束")
+            return
+        if (not ac) and pct is not None and float(pct) <= 90.0:
+            if self._intent.get("reason") == "calibrate":
+                # 校准的关键动作是「完整用到低电量再充满」，走到这一步才算完成
+                self._last_calib = self._day_key()
+                self._data["last_calib"] = self._last_calib
+            self.clear_intent("已拔电使用，本次充满结束")
+
+    def set_full_intent(self, reason: str = "manual",
+                        hours: Optional[float] = None) -> Dict:
+        """声明「本次要充满」，并立刻去改充电上限。
+
+        reason: manual（手动）/ travel（要出门）/ calibrate（做满充校准）
+        返回 {ok, intent, write}；write.need_admin=True 表示需要提请权。
+        """
+        h = self.intent_h if hours is None else float(hours)
+        cur = self._chg.get("value") if isinstance(self._chg, dict) else None
+        self._intent = {"reason": reason, "created": time.time(),
+                        "expire": time.time() + max(0.5, h) * 3600.0,
+                        "prev_limit": cur, "target": self.full_limit}
+        self._data["intent"] = self._intent
+        self._save(force=True)
+        res = self.apply_limit(self.full_limit)
+        return {"ok": True, "intent": dict(self._intent), "write": res}
+
+    def clear_intent(self, reason: str = "") -> None:
+        if not isinstance(self._intent, dict):
+            return
+        self._intent = None
+        self._data["intent"] = None
+        self._save(force=True)
+        self._intent_reason = reason or "充满意图已结束"
+
+    def apply_limit(self, value: int) -> Dict:
+        """真正去写厂商充电上限。权限不够时返回 need_admin=True，由上层提请权。"""
+        try:
+            if self._lim_writer is not None:
+                return dict(self._lim_writer(int(value)) or {})
+            return dict(_hw.set_asus_charge_limit(int(value)) or {})
+        except Exception as e:
+            return {"ok": False, "need_admin": False,
+                    "reason": "写入通道异常: %r" % (e,)}
+
+    def restore_limit(self) -> Dict:
+        """回到养护上限，并结束意图。"""
+        res = self.apply_limit(self.target_limit)
+        self.clear_intent("已回到养护上限 %d%%" % self.target_limit)
+        return {"write": res}
+
+    def calib_days_since(self) -> Optional[int]:
+        """距上次满充校准多少天；从未校准返回 None。"""
+        if not self._last_calib:
+            return None
+        try:
+            import datetime
+            y, m, d = [int(x) for x in str(self._last_calib).split("-")[:3]]
+            return (datetime.date.today() - datetime.date(y, m, d)).days
+        except Exception:
+            return None
+
+    def calib_due(self) -> bool:
+        n = self.calib_days_since()
+        return True if n is None else (n >= self.calib_days)
+
+    def dc_h_day(self) -> float:
+        """近 scene_days 天的日均离电小时数；样本不足返回 -1.0（调用方须先判）。"""
+        days = self._data.get("days", {})
+        keys = sorted(days.keys())[-self.scene_days:]
+        dc_s = sum(float((days[k] or {}).get("dc_s") or 0) for k in keys)
+        sample = sum(float((days[k] or {}).get("sample_s") or 0) for k in keys)
+        if sample < 3600.0:                     # 累计不到 1 小时，不妄下结论
+            return -1.0
+        return (dc_s / 3600.0) / max(1, len(keys))
+
+    def scene(self) -> str:
+        """desk（长期插电）/ mobile（常带出门）/ unknown（样本不够）。"""
+        v = self.dc_h_day()
+        if v < 0:
+            return "unknown"
+        return "mobile" if v >= self.mobile_dc_h else "desk"
+
     # ------------------------------------------------------------ 评估
     @staticmethod
     def _h(sec: float) -> float:
@@ -455,9 +600,13 @@ class BatteryCare:
         chg = dict(getattr(self, "_chg", None) or {})
         chg_v = chg.get("value")
         limited = isinstance(chg_v, int) and chg_v <= self.advise_limit
+        sc = self.scene()
+        dc_h = self.dc_h_day()
+        intent_on = self.intent_active()
 
         adv: List[str] = []
-        if per_day(full_h) >= 1.0 and not limited:
+        # 满充搁置的唠叨只在「长期插电 + 没有充满意图」时才说 —— 有目的的满充不是坏习惯
+        if per_day(full_h) >= 1.0 and not limited and sc != "mobile" and not intent_on:
             if chg_v == 100:
                 tip = ("当前充电上限 100%（满容量）→ 去 MyASUS → 设备设置 → 电源和电池 → "
                        "「电池健康充电」改成「平衡模式」(80%) 或「长效使用模式」(60%)")
@@ -480,13 +629,54 @@ class BatteryCare:
             adv.append("近 %d 天等效循环 %.2f 次（按放电能量折算）" % (len(keys), cyc))
         if not adv:
             adv.append("充放电习惯良好：无明显满充搁置 / 高温充电 / 深放")
-        # 充电上限的现状（自清除式提示：设成 ≤80% 后这条自动换成确认语）
-        if limited:
-            adv.append("充电上限已设 %d%%（%s）：高电压应力已压下去，这是最有效的一条保护"
-                       % (chg_v, chg.get("mode_cn") or "自定义"))
-        elif chg_v == 100:
-            adv.append("充电上限目前是 100%（满容量模式，等于没有保护）："
-                       "想延长寿命可去 MyASUS → 设备设置 → 电池健康充电 改成「平衡模式」(80%)")
+        # ---- 充电上限：按场景给结论，而不是一律「建议 80%」 ----
+        if intent_on:
+            why = {"manual": "手动", "travel": "要出门", "calibrate": "满充校准"}.get(
+                self._intent.get("reason"), "手动")
+            adv.append("本次允许充满（%s）：目标上限 %d%%，拔电用到 90%% 以下会自动结束"
+                       "并提示切回 %d%%" % (why, self.full_limit, self.target_limit))
+        elif sc == "desk" and chg_v is not None:
+            if chg_v >= 100:
+                adv.append("你基本长期插电（近 %d 天日均离电 %.1fh）→ 充电上限建议压到 %d%%："
+                           "满电搁置的老化速率约为维持 60%% 时的 2 倍。%s"
+                           % (min(self.scene_days, len(keys)), dc_h, self.target_limit,
+                              self._how_to_set()))
+            elif chg_v > self.target_limit:
+                adv.append("长期插电场景：当前上限 %d%%，可再压到 %d%%（%s）"
+                           % (chg_v, self.target_limit, self._how_to_set()))
+            else:
+                adv.append("充电上限 %d%%（%s）：长期插电场景下这是最合适的档位，保持即可"
+                           % (chg_v, chg.get("mode_cn") or "自定义"))
+        elif sc == "mobile" and chg_v is not None:
+            if chg_v < 100:
+                adv.append("你常带出门（日均离电 %.1fh）但上限只到 %d%% → 白砍 %d%% 续航，"
+                           "换来的寿命收益不划算。建议改回 100%%，只在明确要长期插电那几天"
+                           "用「本次充满 / 回养护」临时压低。%s"
+                           % (dc_h, chg_v, 100 - chg_v, self._how_to_set()))
+            else:
+                adv.append("你常带出门（日均离电 %.1fh）：100%% 是合理的；"
+                           "若某几天长期插电，可临时切到 %d%%" % (dc_h, self.target_limit))
+        elif chg_v is not None:
+            # 场景还没判出来（样本不足）：只陈述现状 + 说清「再观察几天」，
+            # 既不念叨 80%，也不装作已经有结论。
+            if chg_v >= 100:
+                adv.append("充电上限目前是 100%%（满容量）：插电不拔时建议压到 %d%%。%s"
+                           % (self.target_limit, self._how_to_set()))
+            else:
+                adv.append("充电上限已设 %d%%（%s）：再用几天，程序会按你的插电/离电"
+                           "习惯判断该继续压低还是改回充满"
+                           % (chg_v, chg.get("mode_cn") or "自定义"))
+
+        # ---- 满充校准（电量计需要端点修正，长期不充满会漂移）----
+        if self.calib_due() and not intent_on:
+            n = self.calib_days_since()
+            if n is None:
+                adv.append("还没做过满充校准 → 建议每 %d 天做一次完整充放（用到 %d%% 以下再充满），"
+                           "否则电量计会漂移（表现为「显示 30%% 突然关机」「一直停在 99%%」）"
+                           % (self.calib_days, int(self.deep_soc)))
+            else:
+                adv.append("距上次满充校准已 %d 天（周期 %d 天）→ 该做一次完整充放来修正 SOC 漂移"
+                           % (n, self.calib_days))
         self._advice = adv
         self._stat = {
             "days": len(keys), "full_h": round(full_h, 2), "hot_h": round(hot_h, 2),
@@ -512,8 +702,28 @@ class BatteryCare:
             # 华硕充电上限（只读镜像值）：{supported,value,mode,mode_cn,label,myasus}
             "charge_limit": chg,
             "charge_line": self.charge_line(),
+            # 按场景的充电上限策略（2026-10-11）
+            "scene": self.scene(),
+            "dc_h_day": (round(self.dc_h_day(), 2) if self.dc_h_day() >= 0 else None),
+            "intent": dict(self._intent) if isinstance(self._intent, dict) else None,
+            "intent_active": self.intent_active(),
+            "intent_reason": getattr(self, "_intent_reason", ""),
+            "target_limit": self.target_limit,
+            "full_limit": self.full_limit,
+            "calib_due": self.calib_due(),
+            "calib_days_since": self.calib_days_since(),
             "today": dict(self._data.get("days", {}).get(self._today_key) or {}),
         }
+
+    def _how_to_set(self) -> str:
+        """「怎么改充电上限」的一句话（有没有 MyASUS 决定措辞）。"""
+        chg = getattr(self, "_chg", None) or {}
+        if chg.get("supported"):
+            return ("去 MyASUS → 设备设置 → 电池健康充电 切换，"
+                    "或用面板上的「本次充满 / 回养护」（首次需确认一次 UAC）")
+        if chg.get("myasus"):
+            return "MyASUS 里设一次「电池健康充电」，之后本程序就能读到并跟随"
+        return "本机型读不到厂商充电上限接口，只能用「充满后拔掉适配器」这种土办法"
 
     def charge_line(self) -> str:
         """充电上限的一行短文本（面板/网页共用）"""

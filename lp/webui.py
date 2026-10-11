@@ -313,6 +313,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, mgr.gpupick_probe_cancel())
         elif path == "/api/gpupick_restore_all":
             self._json(200, mgr.gpupick_restore_all())
+        elif path == "/api/charge_limit":
+            # action: full（本次充满）/ restore（回养护上限）/ clear（只结束意图）
+            act = str((data or {}).get("action") or "full").lower()
+            if act not in ("full", "restore", "clear"):
+                self._json(400, {"error": "bad action"})
+            else:
+                reason = str((data or {}).get("reason") or "manual")
+                self._json(200, mgr.charge_limit_set(act, reason))
         elif path == "/api/thermal_set":
             mode = str((data or {}).get("mode") or "").lower()
             if mode not in ("auto", "quiet", "perf"):
