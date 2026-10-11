@@ -80,8 +80,9 @@ def main():
 
     tree = api("POST", "/repos/%s/git/trees" % repo, {"tree": items})
     msg = git("log", "-1", "--pretty=%B")
-    name = git("log", "-1", "--pretty=%an") or "yqfoliver"
-    email = git("log", "-1", "--pretty=%ae") or "706425202@qq.com"
+    # 作者信息一律动态取（git log 缺失时退 git config；用户名/邮箱不进源码）
+    name = git("log", "-1", "--pretty=%an") or git("config", "user.name")
+    email = git("log", "-1", "--pretty=%ae") or git("config", "user.email")
     ci = api("POST", "/repos/%s/git/commits" % repo,
              {"message": msg, "tree": tree["sha"], "parents": [remote_sha],
               "author": {"name": name, "email": email},
