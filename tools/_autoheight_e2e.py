@@ -78,11 +78,46 @@ STATUS = {
     "gpupick": GPU_WORST,
 }
 
+# 短状态：复刻用户 2026-10-11 反馈「底部空一大片」那张截图 —— 内容明显比
+# 初始窗口(604)矮，用来证明新版测量能正确把窗口缩回去（旧 scrollHeight 会因
+# 视口托底卡在 604 缩不回去）。
+CARE_SHORT = {
+    "enabled": True, "score": 75, "advice": [],
+    "charge_line": "充电上限：100%（满容量·无保护）",
+    "limit_state": {"value": 100, "state": "synced"},
+    "charge_limit": {"supported": True, "value": 100, "mode": "balanced",
+                     "myasus": True},
+    "scene": "desk", "intent_active": False, "target_limit": 80,
+    "full_limit": 100, "calib_due": True, "calib_days_since": 45,
+}
+SHORT_STATUS = {
+    "mode": "office", "auto": True, "ac": True,
+    "battery": {"percent": 95, "ac": True, "charging": True,
+                "rate_w": -8.1, "health": 84, "full_mwh": 61500,
+                "charge_mwh": 58400, "cycle": 112},
+    "battery_info": {"display_hz": 165, "care": CARE_SHORT},
+    "alloc": {"enabled": True, "verdict_cn": "判定中", "cpu_w": None,
+              "gpu_w": None, "system_w": None, "gpu_temp": None,
+              "gpu_util": 0, "cpu_temp": None, "envelope_w": 110,
+              "gpu_tgp_max": 100,
+              "reason": "非游戏档，不参与功耗重分配", "events": []},
+    "pd": {"active": False, "tier": "unknown", "supply_w": 82,
+           "supply_src": "本次实测（充电下界）", "machine_w": 41.0,
+           "force_igpu": False},
+    "gpu_eco": {"eco": 0},
+    "thermal": {"fan_cpu": 38, "fan_gpu": 37, "cpu_c": 93, "gpu_c": 49,
+                "asus_mode": "full"},
+    "load": {"cpu": 28, "disk": 5, "net": 24, "gpu": 0},
+    "gpupick": {"enabled": True, "current": {"process": "explorer.exe",
+               "mode": "dgpu", "src": "builtin"}},
+}
+
 
 class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/status"):
-            body = json.dumps(STATUS, ensure_ascii=False).encode("utf-8")
+            payload = SHORT_STATUS if "short" in self.path else STATUS
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

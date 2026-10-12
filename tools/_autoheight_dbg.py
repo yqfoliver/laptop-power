@@ -50,7 +50,7 @@ class RECT(W.RECT):
 
 
 def main():
-    url = "http://127.0.0.1:8798/"
+    url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8798/"
     panel = W.WebView2Panel(url, os.path.join(
         os.environ.get("LOCALAPPDATA", "."), "LaptopPowerAuto", "webview2_dbg"))
     stop = threading.Event()
