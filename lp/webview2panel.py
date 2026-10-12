@@ -531,12 +531,14 @@ class WebView2Panel:
     # EventArgs 上 4=TryGetWebMessageAsString。Navigate=5 已在别处验证过，
     # 这几个下标与之同一张 vtable，顺序来自官方 ICoreWebView2 头文件。
     _HEIGHT_SCRIPT = (
-        "(function(){var s=function(){try{var h=Math.ceil("
-        "document.documentElement.scrollHeight);"
+        "(function(){var s=function(){try{var h=0,b=document.body;"
+        "if(b&&b.getBoundingClientRect().bottom>0)"
+        "h=Math.ceil(b.getBoundingClientRect().bottom);"
+        "if(!(h>0))h=Math.ceil(document.documentElement.scrollHeight);"
         "window.chrome.webview.postMessage("
         "JSON.stringify({__panel_h:h}));}catch(e){}};"
         "try{new ResizeObserver(function(){setTimeout(s,0);})"
-        ".observe(document.documentElement);}catch(e){"
+        ".observe(document.body);}catch(e){"
         "window.setInterval(s,1500);}"
         "window.addEventListener('load',function(){setTimeout(s,50);});"
         "setTimeout(s,50);})();")

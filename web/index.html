@@ -363,10 +363,7 @@ function renderBatt(){
   const cl = (care.charge_limit)||{};
   const pd = state.pd||{};
   let okText = "", advText = "";
-  if(state.ac){
-    if(cl.value!=null && cl.value<100) okText = "充电上限 "+cl.value+"%（养护模式）";
-    else if(state.alloc && state.alloc.enabled) okText = "功耗分配已启用";
-  }else{
+  if(!state.ac){
     const w = B.rate_avg_w||B.rate_w;
     if(B.discharging && w) okText = "放电 " + w1(w) + " W";
   }
@@ -385,10 +382,8 @@ function renderBatt(){
                         wall:"原装适配器", unknown:"充电器测定中"};
     if(pd.tier === "unknown" || pd.tier == null){
       // 未标定：supply_w 只是充电下界，不能说成「上限」，也别报「余量」吓人
-      let t = "充电器测定中 · 已测得下界 " + w0(pd.supply_w) + " W";
-      if(pd.supply_src) t += "（" + pd.supply_src + "）";
-      t += "\n跑一次重负载（如游戏）即自动标定，之后按档位套策略";
-      advText = t;
+      advText = "充电器测定中 · 已测得下界 " + w0(pd.supply_w) +
+                " W · 跑一次重负载（如游戏）即自动标定";
     }else{
       let t = (TIER_SHORT[pd.tier] || "Type-C") + " · 上限 " +
               w0(pd.supply_w) + " W · 余量 " +
@@ -634,7 +629,17 @@ setInterval(tick, 2000);
   var last = -1;
   window.__panelReportH = function(){
     try{
-      var h = Math.ceil(document.documentElement.scrollHeight);
+      // 重要：绝不能用 documentElement.scrollHeight —— 根元素的 scrollHeight
+      // 会被视口高度「托底」：窗口一旦比内容高，读到的永远是窗口高度，于是
+      // 上报值恒等于当前窗口高，_fit_height 只涨不缩，底部空白就定格了（已踩）。
+      // 改量 .wrap 的真实矩形底边 + body 底 padding；与 ?probe 探针同口径。
+      var wrap = document.querySelector(".wrap");
+      var h = 0;
+      if(wrap){
+        h = Math.ceil(wrap.getBoundingClientRect().bottom)
+          + parseFloat(getComputedStyle(document.body).paddingBottom || "0");
+      }
+      if(!(h > 0)) h = Math.ceil(document.body.getBoundingClientRect().bottom) || Math.ceil(document.documentElement.scrollHeight);
       if(h !== last){
         last = h;
         window.chrome.webview.postMessage(JSON.stringify({__panel_h: h}));
@@ -651,7 +656,7 @@ setInterval(tick, 2000);
   }catch(e){}
   if(window.ResizeObserver){
     new ResizeObserver(function(){ setTimeout(window.__panelReportH, 0); })
-        .observe(document.documentElement);
+        .observe(document.querySelector(".wrap") || document.documentElement);
   }
   window.addEventListener("load", function(){ setTimeout(window.__panelReportH, 50); });
   window.__panelReportH();
