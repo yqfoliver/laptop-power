@@ -15,6 +15,7 @@ import os
 import sys
 
 from . import algo, config, hw, powercfgctl as pc
+from . import powrprof as pp
 from .algo import LoadTracker, SwitchGovernor, build_reason
 from .alloc import ACTION_CN, VERDICT_CN, PowerAllocator
 from .battery import BatteryMonitor
@@ -94,7 +95,15 @@ class Manager:
         self.pd = PdBudget(cfg)
         self._pd_at = 0.0
         self._pd_hz = 0                # 本模块降到的刷新率（0=未降）
-        self._pd_dim = False           # 本模块是否压着亮度
+        self._pd_dim = False            # 本模块是否压着亮度
+        # Windows 节能模式让位（2026-10-17）：离电时若系统已把电源模式滑块
+        # 压到「最佳能效」（Energy Saver 自动/手动触发），CPU 限频归 Windows
+        # 统一管，工具不再叠加自己的 PROCTHROTTLEMAX —— 两层压制既无增益，
+        # 又让「到底是谁在压」不可观测，看门狗还会误判「内核卡死」反复自愈。
+        # _ov/_ov_at 是叠加层 GUID 的读取缓存（panel 秒级轮询与轮询共用）。
+        self._esaver_on = False
+        self._ov: Optional[str] = None
+        self._ov_at = 0.0
         # 供电能力辨识（2026-10-10）：供电能力是**当前这个充电器**的属性，
         # 不是机器的属性。换充电器必然经历一次拔电 → 新会话 → 作废旧值重新现测。
         self.pdsrc = None
@@ -440,6 +449,10 @@ class Manager:
                         val = self.learner.knob_value(name, knob, val)
                     # 散热策略封顶：静音档把非游戏档的 CPU 上限压到策略值
                     val = self.thermal.apply_to_knobs(name, not on_bat, knob, val)
+                    # Windows 节能模式让位期间，切档也不写自己的 CPU 上限，
+                    # 否则每切一次档就给系统压好的频率再叠一层（两侧同改）
+                    if knob == "proc_max" and self._esaver_on:
+                        val = 100
                     for key in meta[1]:
                         s = self._plan(scheme).get(key)
                         if s is None:
@@ -691,6 +704,10 @@ class Manager:
             "gpupick": self.gpupick_report(),
             "ppm_note": self._ppm_note,
             "ppm_fixes": self._ppm_fixes,
+            # Windows 节能模式（2026-10-17）：energy_saver=系统正在替我们限频
+            # （此时工具已让位/即将让位）；overlay 是滑块的实时档位，供展示。
+            "energy_saver": self._energy_saver(st),
+            "overlay": pp.OVERLAY_LABEL.get(self._overlay_guid() or "", "未知"),
             # 面板字体比例（config.panel_font_scale，网页端用 CSS zoom 应用）
             "panel_font_scale": float(self.cfg.get("panel_font_scale", 1.0) or 1.0),
         }
@@ -777,6 +794,9 @@ class Manager:
             pdinfo = st.get("pd") or {}
             if pdinfo.get("active"):
                 tip = "%s｜%s" % (tip, self.pd.line())
+            # Windows 节能模式正在统一限频：说明「卡/慢」的来源不是本工具
+            if st.get("energy_saver"):
+                tip = "%s｜Windows 节能接管" % tip
             if getattr(self, "_tray", None):
                 self._tray.set_tooltip(tip[:127])
         except Exception:
@@ -1042,6 +1062,7 @@ class Manager:
         self._gpu_eco_tick(st)
         self._gpupick_tick(st)
         self._trim_tick()
+        self._esaver_tick(st)          # Windows 节能模式让位/回收（先于看门狗）
         self._ppm_watchdog(st)
         return info
 
@@ -1285,6 +1306,111 @@ class Manager:
         except Exception:
             return 0
 
+    # ------------------------------------- Windows 节能模式让位（2026-10-17）
+    def _overlay_guid(self) -> Optional[str]:
+        """Windows「电源模式」滑块当前叠加层 GUID（带 2s 缓存）。
+
+        status() 被面板秒级轮询，而叠加层本身秒级才会变；缓存一次读取，
+        显示链路与轮询判权共用，不必每秒都翻一次 powrprof。
+        """
+        now = time.time()
+        if self._ov_at and now - self._ov_at < 2.0:
+            return self._ov
+        try:
+            self._ov = pp.overlay()
+        except Exception:
+            self._ov = None
+        self._ov_at = now
+        return self._ov
+
+    def _energy_saver(self, st: dict) -> bool:
+        """Windows 节能模式是否正在替我们限频（离电 + 叠加层=最佳能效）。
+
+        Energy Saver 触发时 Windows 把电源模式滑块压到「最佳能效」，由系统
+        统一限频。此时工具若再叠加自己的 CPU 上限：有效值是两者取小、没有
+        额外收益，却让「卡/慢」的来源不可观测，限频看门狗还会把 Windows
+        造成的低频误判为「内核卡死」反复自愈（写进去也被叠加层盖回去）。
+        插电时用户手动把滑块拨到最佳能效是主动选择，不让位。
+        """
+        if st.get("ac"):
+            return False
+        return self._overlay_guid() == pp.OVERLAY_SILENT
+
+    def _esaver_tick(self, st: dict) -> None:
+        """Windows 节能模式接管：让位 / 回收，只动 PROCTHROTTLEMAX 一个旋钮。
+
+        · 进入：CPU 上限放开到 100（交给系统统一限）；
+        · 退出：按 AC/DC 两侧分别补写回本档位应有的值。
+        只放 proc_max —— 刷新率/亮度/独显 Eco 这些杠杆 Windows 节能模式
+        一概不碰，不存在双重压制，保持工具自己的策略不变。
+        用户可在 config esaver_defer=false 关掉让位（仍会显示 Windows 状态）。
+        """
+        es = self._energy_saver(st) and bool(self.cfg.get("esaver_defer", True))
+        if es == self._esaver_on:
+            return
+        self._esaver_on = es
+        if es:
+            if self.current and self.current != "balanced":
+                try:
+                    self.set_proc_max(100)
+                    self.last_reason = "Windows 节能模式接管 CPU 限频，工具暂让位"
+                    self._emit()
+                except Exception:
+                    pass
+            return
+        # 退出让位：补写本档位两侧应有的 CPU 上限
+        if self.current and self.current != "balanced":
+            try:
+                self._esaver_restore()
+                self.last_reason = "Windows 节能模式已退出，恢复本档位 CPU 上限"
+                self._emit()
+            except Exception:
+                pass
+
+    def _esaver_restore(self) -> None:
+        """按 AC/DC 两侧分别补写本档位 proc_max。
+
+        不能图省事两侧写同一个值：续航档 DC=30 / AC=100，saver 档 DC=15，
+        写混一刻，拔电再战时限频就悄悄消失了 —— 「曾修过的保护逻辑悄悄
+        失效」正是这个项目栽得最多的坑。值含自学习覆盖、散热策略封顶、
+        弱电源封顶三重取小（与 apply() 写入路径保持一致）。
+        """
+        cur = self.current or "balanced"
+        if cur == "balanced":
+            return
+        prof = PROFILES.get(cur) or {}
+        scheme = self.cfg.get("custom_scheme") or ""
+        if not scheme or not pc.list_schemes().get(scheme):
+            return
+        try:
+            s = self._plan(scheme).get("PROCTHROTTLEMAX")
+        except Exception:
+            return
+        if s is None:
+            return
+        for on_bat in (False, True):
+            table = prof.get("dc") if on_bat else prof.get("ac", {})
+            v = int((table or {}).get("proc_max", 100) or 100)
+            if self.cfg.get("learn_enabled", True):
+                try:
+                    v = int(self.learner.knob_value(cur, "proc_max", v))
+                except Exception:
+                    pass
+            v2 = self.thermal.apply_to_knobs(cur, not on_bat, "proc_max", v)
+            if v2:
+                v = min(v, int(v2))
+            cap = int(getattr(self.pd, "cpu_cap", 100) or 100)
+            if cap < 100:
+                v = min(v, cap)
+            v = max(10, min(100, v))
+            if s.current(on_bat) == v:
+                continue
+            if pc.set_value(scheme, s, v, on_bat):
+                if on_bat:
+                    s.dc = v
+                else:
+                    s.ac = v
+
     def _ppm_watchdog(self, st: dict) -> None:
         """检测并自愈「内核已生效处理器上限被卡死」。
 
@@ -1292,7 +1418,12 @@ class Manager:
         本机最低性能 = 标称的 30% = 600MHz），连续 6 个采样（约 30 秒）。
         正常情况占用高时性能请求必然拉满；只有卡死时才会双低。
         误判代价极低（重写的是自建计划自己的值 + 重新激活，无副作用）。
+        **例外**：Windows 节能模式让位期间（_esaver_on）低频是系统故意的，
+        不是卡死 —— 自愈写进去的值也会被叠加层盖回去，纯属白折腾还误报。
         """
+        if self._esaver_on:
+            self._stall_n = 0
+            return
         pw = self._power_snap(want_gpu=bool(st.get("ac")))
         util = pw.get("cpu_util")
         perf = pw.get("cpu_perf_pct")

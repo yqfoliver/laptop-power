@@ -46,6 +46,7 @@
   .hero .mode{font-size:16px;font-weight:700;letter-spacing:.2px}
   .hero .autoTag{float:right;font-size:10.5px;font-weight:600}
   .hero .desc{font-size:10.5px;color:var(--muted);margin-top:2px}
+  .hero .esaverNote{font-size:10.5px;color:var(--amber);margin-top:4px;line-height:1.45}
 
   /* 五个档位一行排布，省掉一整行高度 */
   .modes{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}
@@ -146,6 +147,7 @@
     <span class="autoTag" id="autoTag">自动判定</span>
     <div class="mode" id="mode">—</div>
     <div class="desc" id="reason"></div>
+    <div class="esaverNote" id="esaverNote" hidden>⚡ Windows 节能模式接管 CPU 限频 · 工具暂让位（卡顿/变慢来源于系统节能）</div>
   </div>
 
   <div class="modes" id="modes"></div>
@@ -283,6 +285,8 @@ function render(){
   }catch(e){}
   document.getElementById("mode").textContent = state.mode_label||"—";
   document.getElementById("reason").textContent = "原因：" + (state.reason||"—");
+  // Windows 节能模式让位提示（2026-10-17）：只在系统真的在替我们限频时出现
+  try{ document.getElementById("esaverNote").hidden = !state.energy_saver; }catch(e){}
   const auto = state.auto;
   const tag = document.getElementById("autoTag");
   tag.textContent = auto ? "自动判定" : "手动锁定";

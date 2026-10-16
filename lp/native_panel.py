@@ -602,6 +602,10 @@ class NativePanel:
                    RECT(W - pad - S(84), y + S(10), W - pad - S(10), y + S(32)),
                    size_px=S(11), flags=DT_SINGLELINE | DT_VCENTER | DT_RIGHT)
         reason = snap.get("reason") or ""
+        # Windows 节能模式让位提示（2026-10-17）：系统正在替工具限频，
+        # 拼在原因区即可，不新增行高（GDI 面板布局是手算坐标）
+        if snap.get("energy_saver"):
+            reason = ((reason + " · ") if reason else "") + "Windows 节能模式接管 CPU 限频"
         if reason:
             self._text(hdc, "原因：" + reason, C_SUB,
                        RECT(pad + S(16), y + S(44), W - pad - S(16), y + card_h - S(6)),

@@ -50,6 +50,11 @@ DEFAULT_CONFIG = {
     "learn_enabled": True,            # 自学习总开关
     "hotkey": "Ctrl+Alt+P",
     "last_profile": "balanced",
+    # Windows 节能模式让位（2026-10-17）：离电时系统已把电源模式滑块压到
+    # 「最佳能效」（Energy Saver 自动/手动触发）期间，工具不再叠加自己的
+    # CPU 上限（两层压制无增益且不可观测，看门狗还会误判卡死）。置 false
+    # 可让工具自己的限频策略优先；Windows 状态仍会显示。
+    "esaver_defer": True,
 
     # ---------------- 游戏档 CPU/GPU 功耗分配（2026-10-04 新增） ----------------
     # 独显功耗墙通常不可软件设定（vBIOS 锁死），唯一控制杆是 CPU 侧；
