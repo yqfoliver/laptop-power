@@ -40,6 +40,7 @@ S4 手段用尽仍在放电：不再加码（继续压只会毁体验），明�
 """
 
 from typing import Optional, Dict, Any
+import time
 
 STAGE_CN = {
     0: "正常",
@@ -112,6 +113,9 @@ class PdBudget:
         self.stuck = False           # 手段用尽仍在放电
         self._lb_streak = 0          # 充电下界连续超限计数（抬升确认用）
         self._dn_streak = 0          # 放电上界连续偏低计数（下修确认用）
+        # 学成溯源（2026-10-17）：这个 supply_w 是哪一拍、什么样的负载推出
+        # 来的。面板只显示结果值，用户问「108W 哪来的」时不能只靠翻代码。
+        self.learn_info: Dict[str, Any] = {}
         self._tier: Optional[str] = None   # 上一轮档位（滞回用）
         self._src = "未知"           # 上限的来源标签（面板显示）
         self.reload_cfg(cfg)
@@ -128,6 +132,13 @@ class PdBudget:
             return
         if not (SUPPLY_MIN_W <= machine_w <= SUPPLY_MAX_W):
             return
+
+        def _note(how: str) -> None:
+            self.learn_info = {"at": round(time.time(), 1),
+                               "machine_w": round(machine_w, 1),
+                               "rate_w": round(rate_w, 1),
+                               "how": how}
+
         if rate_w > 0.15:
             est = machine_w - rate_w
             if est < SUPPLY_MIN_W:
@@ -136,6 +147,7 @@ class PdBudget:
                 self.supply_w = est
                 self.supply_firm = True
                 self._src = "本次实测（放电）"
+                _note("放电标定")
             else:
                 # 放电是**精确上界**：连续两拍都说「供不上」，就是换了个更弱的
                 # 电源（或者负载真的超了），必须快速认账 —— 慢一拍电池就多放
@@ -151,6 +163,7 @@ class PdBudget:
                     a = SUPPLY_DN_EWMA
                     self.supply_w = (1 - a) * self.supply_w + a * target
                     self._src = "本次实测（放电）"
+                    _note("放电确认下修")
                 else:
                     # 单拍：仍按小步跟随，别被一个尖峰拽下去
                     if est > self.supply_w + SUPPLY_JUMP_W:
@@ -159,6 +172,7 @@ class PdBudget:
                         est = self.supply_w - SUPPLY_JUMP_W
                     self.supply_w = 0.7 * self.supply_w + 0.3 * est
                     self._src = "本次实测（放电，确认中）"
+                    _note("放电单拍跟随")
                 self.supply_firm = True
             self._lb_streak = 0     # 放电精确标定优先，作废未确认的抬升
         else:
@@ -171,6 +185,7 @@ class PdBudget:
                 if lb <= SUPPLY_MAX_W:
                     self.supply_w = lb
                     self._src = "本次实测（充电下界）"
+                    _note("充电下界·首拍")
             elif lb > self.supply_w:
                 # 抬升必须「连续多拍」确认：虚高读数只持续一两拍，中间被
                 # 正常读数打断就把计数清零 —— 堵住棘轮被小步累计顶穿的路
@@ -182,11 +197,13 @@ class PdBudget:
                             and lb <= SUPPLY_MAX_W:
                         self.supply_w = lb
                         self._src = "本次实测（充电下界）"
+                        _note("充电下界·连续确认抬升")
                     elif lb <= SUPPLY_MAX_W:
                         # 真电源升级（lb 远超估计）：确认充分就小步走，
                         # 几拍之内爬到新上限，不会被卡死
                         self.supply_w += SUPPLY_JUMP_W
                         self._src = "本次实测（充电下界）"
+                        _note("充电下界·小步爬升")
             else:
                 self._lb_streak = 0
         if self.supply_w is not None:
@@ -300,6 +317,7 @@ class PdBudget:
         self.supply_firm = False
         self.predicted = False
         self.predict_armed = False
+        self.learn_info = {}
         self._tier = "unknown"   # 换源后档位作废：新充电器是谁还没标定过
         self.pre_s = 0.0
         self.over_s = 0.0

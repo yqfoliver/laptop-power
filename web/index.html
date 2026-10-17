@@ -385,9 +385,12 @@ function renderBatt(){
     const TIER_SHORT = {weak:"弱电源", mid:"中等供电", high:"强供电",
                         wall:"原装适配器", unknown:"充电器测定中"};
     if(pd.tier === "unknown" || pd.tier == null){
-      // 未标定：supply_w 只是充电下界，不能说成「上限」，也别报「余量」吓人
-      advText = "充电器测定中 · 已测得下界 " + w0(pd.supply_w) +
-                " W · 跑一次重负载（如游戏）即自动标定";
+      // 未标定：supply_w 只是充电下界。文案必须说清「不是额定功率」——
+      // 2026-10-17 用户看到「已测得下界 108W」误以为是测定结果/额定值。
+      // 下界只能证明「充电器至少供得起这么多」，weak/mid/high/wall 定档
+      // 与预判限帧都必须等放电事件把值标实（firm）之后才会发生。
+      advText = "充电器测定中 · 实测至少供得起 " + w0(pd.supply_w) +
+                " W（只是下界，不是额定功率）\n插电跑几分钟重负载（如游戏）即自动标定真实上限；未标定前策略中性、不干预";
     }else{
       let t = (TIER_SHORT[pd.tier] || "Type-C") + " · 上限 " +
               w0(pd.supply_w) + " W · 余量 " +

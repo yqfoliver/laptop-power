@@ -167,6 +167,53 @@ ok(abs(s.state["current"]["watts"] - 89.4) < 0.01, "离谱值不落盘",
    s.state["current"])
 os.remove(p)
 
+# ---------------------------------------------------------------- 10. 学成溯源
+print("== 10. learn_info：这个供电值是哪一拍、什么负载推出的 ==")
+p = tmp_path()
+s = ps.PdSource(path=p)
+s.note_ac(True)
+info = {"at": 1792234799.6, "machine_w": 105.3, "rate_w": 2.7,
+        "how": "充电下界·连续确认抬升"}
+s.save(108.0, firm=False, info=info)
+d = json.load(open(p, encoding="utf-8"))
+ok(d["current"].get("learn", {}).get("how") == "充电下界·连续确认抬升",
+   "current 带学成溯源", d["current"].get("learn"))
+ok(abs(d["current"]["learn"]["machine_w"] - 105.3) < 0.01,
+   "溯源含当时整机功耗", d["current"]["learn"])
+s.note_ac(False)          # 拔电竞档
+h = s.state["history"]
+ok(h and h[-1].get("learn", {}).get("how") == "充电下界·连续确认抬升",
+   "归档会话也带溯源", h[-1].get("learn") if h else None)
+ok(h[-1]["learn"]["machine_w"] == 105.3, "归档的 machine_w 完整",
+   h[-1]["learn"])
+os.remove(p)
+
+# _learn_supply 各分支都记录溯源（首拍 / 连续确认抬升 / 放电标定）
+print("== 10b. _learn_supply 分支记录 learn_info ==")
+pd = PdBudget({})
+feed(pd, True, -3.0, 100.0, n=1)          # 充电 + 100W 整机 + 3W 充电
+ok(pd.learn_info.get("how") == "充电下界·首拍", "首拍记录", pd.learn_info)
+ok(pd.learn_info.get("machine_w") == 100.0, "首拍带 machine_w", pd.learn_info)
+ok(pd.learn_info.get("rate_w") == -3.0, "首拍带 rate_w", pd.learn_info)
+from lp.pdbudget import SUPPLY_LB_STREAK
+feed(pd, True, -2.0, 105.0, n=SUPPLY_LB_STREAK)   # 连续 10 拍 lb=107（+4W）
+ok(pd.supply_w == 107.0, "棘轮抬到新下界", pd.supply_w)
+ok(pd.learn_info.get("how") == "充电下界·连续确认抬升", "抬升记录",
+   pd.learn_info)
+ok(pd.learn_info.get("machine_w") == 105.0, "抬升记录的 machine_w 是新值",
+   pd.learn_info)
+# 跳变超过 15W 时走「小步爬升」（+15 封顶），不能一步跳过去
+pd3 = PdBudget({})
+feed(pd3, True, -3.0, 100.0, n=1)
+feed(pd3, True, -2.0, 140.0, n=SUPPLY_LB_STREAK)
+ok(pd3.supply_w == 118.0, "小步爬升封顶 +15", pd3.supply_w)
+ok(pd3.learn_info.get("how") == "充电下界·小步爬升", "小步爬升记录",
+   pd3.learn_info)
+pd2 = PdBudget({})
+feed(pd2, True, 20.0, 60.0, n=1)          # 放电 20W -> est=40W 精确上界
+ok(pd2.supply_firm and pd2.learn_info.get("how") == "放电标定",
+   "放电首拍即标定并记录", pd2.learn_info)
+
 print("\n%d 项断言，失败 %d" % (N[0], len(FAILS)))
 for f in FAILS:
     print("  FAIL:", f)

@@ -238,7 +238,18 @@ class Manager:
             base = "381b4222-f694-41f0-9685-ff5bb260df2e"
 
         cfg["original_scheme"] = base
-        new = pc.duplicate_scheme(base)
+        # duplicate_scheme 偶发瞬断（2026-10-17 01:12 实测一条：更新安装期
+        # 创建即失败，全天仅一次且随后自愈）。失败呼声前给一次 1.5s 重试，
+        # 挡住了这类「这辈子只碰一次」的失败 —— 而失败会让整个档位切换
+        # 毛都不剩，安静得只有 error.log 知道。
+        new = None
+        for attempt in (0, 1):
+            new = pc.duplicate_scheme(base)
+            if new:
+                break
+            if attempt == 0:
+                time.sleep(1.5)
+                self._plan_cache.pop(base, None)
         if not new:
             raise RuntimeError("创建电源计划失败，请确认以管理员身份运行")
         pc.rename_scheme(new, cfg.get("custom_scheme_name", "笔记本自适应电源"))
@@ -1194,7 +1205,9 @@ class Manager:
             self._pd_supply_saved = v
             self._pd_supply_saved_at = now
             if self.pdsrc is not None:
-                self.pdsrc.save(v, firm=bool(getattr(self.pd, "supply_firm", False)))
+                # learn_info 让「这个值哪来的」可溯源（machine_w/rate_w/how）
+                self.pdsrc.save(v, firm=bool(getattr(self.pd, "supply_firm", False)),
+                                info=getattr(self.pd, "learn_info", None) or None)
         except Exception:
             pass
 
