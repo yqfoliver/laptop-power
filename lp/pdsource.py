@@ -134,7 +134,8 @@ class PdSource:
         h.append({"watts": round(w, 1),
                   "firm": bool(cur.get("firm")),
                   "start_ts": cur.get("session_start"),
-                  "end_ts": round(time.time(), 1)})
+                  "end_ts": round(time.time(), 1),
+                  "learn": cur.get("learn")})
         self.state["history"] = h[-HISTORY_MAX:]
         self.state["current"] = None
         self._save()
@@ -178,8 +179,14 @@ class PdSource:
         # 沿用也要重新确认：交给放电/充电分支继续修正
         return {"watts": w, "firm": bool(cur.get("firm"))}
 
-    def save(self, watts: Optional[float], firm: bool = False) -> None:
-        """记录本次会话实测到的供电能力（限频由调用方控制）。"""
+    def save(self, watts: Optional[float], firm: bool = False,
+             info: Optional[Dict[str, Any]] = None) -> None:
+        """记录本次会话实测到的供电能力（限频由调用方控制）。
+
+        info：学成溯源（learn_info）——哪一拍、什么负载推出的这个值。
+        2026-10-17 用户看到面板的 108W 问「是否正确」，归档里只有结果值，
+        回答「哪来的」还得翻代码；带上 machine_w/rate_w/how 即可自证。
+        """
         if watts is None:
             return
         try:
@@ -189,11 +196,14 @@ class PdSource:
         if not (25.0 <= w <= 330.0):
             return
         self.adopted = False
-        self.state["current"] = {"watts": round(w, 1),
-                                 "firm": bool(firm),
-                                 "ts": round(time.time(), 1),
-                                 "session_start": (round(self.session_start, 1)
-                                                   if self.session_start else None)}
+        cur = {"watts": round(w, 1),
+               "firm": bool(firm),
+               "ts": round(time.time(), 1),
+               "session_start": (round(self.session_start, 1)
+                                 if self.session_start else None)}
+        if info:
+            cur["learn"] = dict(info)
+        self.state["current"] = cur
         self._save()
 
     def forget(self) -> None:
