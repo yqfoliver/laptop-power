@@ -230,6 +230,9 @@ class BatteryCare:
             b = {"full_soc_s": 0.0, "hot_charge_s": 0.0, "deep_s": 0.0,
                  "charge_wh": 0.0, "discharge_wh": 0.0, "sample_s": 0.0,
                  "relief_s": 0.0, "max_heat_c": 0.0,
+                 # 插电补电放电（Type-C 供不上时电池出力）：不计入 discharge_wh
+                 # 会漏掉整段弱电源游戏放电，但它真实参与循环老化，必须单独有桶
+                 "ac_drain_wh": 0.0,
                  # 场景判定要区分插电/离电时长；intent_full_s 是「有目的的满充」
                  "ac_s": 0.0, "dc_s": 0.0, "intent_full_s": 0.0}
             days[key] = b
@@ -299,6 +302,12 @@ class BatteryCare:
                     b["charge_wh"] = b.get("charge_wh", 0.0) + wh
                 elif discharging:
                     b["discharge_wh"] = b.get("discharge_wh", 0.0) + wh
+                elif ac and float(rate) > 0.15:
+                    # 插电补电放电（2026-10-18）：Type-C 供不上时电池在替电源
+                    # 出力，ACPI 两标志皆假、discharging 也是假 —— 旧口径整段
+                    # 漏计（10-18 实际放了 ~78Wh，discharge_wh 却记 0.00）。
+                    # 这种放电还是大电流+高温，对循环数的贡献必须计入。
+                    b["ac_drain_wh"] = b.get("ac_drain_wh", 0.0) + wh
 
         # 5) 充电高热缓解动作（插电 / 非游戏 / 可还原）
         self._relief_tick(charging, heat_c, batt, dt)
@@ -663,6 +672,8 @@ class BatteryCare:
         deep_s = sum(float((days[k] or {}).get("deep_s") or 0) for k in keys)
         ch_wh = sum(float((days[k] or {}).get("charge_wh") or 0) for k in keys)
         dis_wh = sum(float((days[k] or {}).get("discharge_wh") or 0) for k in keys)
+        # 插电补电放电单列：口径上和「离电用电池」分开，但它是真实循环
+        acd_wh = sum(float((days[k] or {}).get("ac_drain_wh") or 0) for k in keys)
 
         full_h, hot_h, deep_h = self._h(full_s), self._h(hot_s), self._h(deep_s)
         span_days = max(1, len(keys))
@@ -676,7 +687,9 @@ class BatteryCare:
         full_mwh = batt.get("full_mwh")
         cyc = None
         if full_mwh:
-            cyc = round(dis_wh / max(0.001, full_mwh / 1000.0), 2)
+            # 等效循环按「总放电能量」折算：插电补电放电也是电池的循环，
+            # 漏掉它会把 Type-C 弱电源游戏的真实代价藏起来（10-18 实例）。
+            cyc = round((dis_wh + acd_wh) / max(0.001, full_mwh / 1000.0), 2)
 
         chg = dict(getattr(self, "_chg", None) or {})
         chg_v = chg.get("value")
@@ -706,6 +719,13 @@ class BatteryCare:
         if per_day(deep_h) >= 0.25:
             adv.append("近 %d 天低于 %d%% 的深放日均 %.1fh → 阳极析锂风险，建议 30~40%% 就补电"
                        % (span_days, int(self.deep_soc), per_day(deep_h)))
+        # 插电补电放电：弱电源打游戏的代价，必须让人看见（2026-10-18 实例：
+        # 一天放了 ~78Wh 而 discharge_wh 记 0.00，补电放电被整段藏起来了）
+        if acd_wh >= 1.0:
+            adv.append("近 %d 天插电补电放电 %.1fWh（日均 %.1fWh，已计入等效循环）→ "
+                       "Type-C 供不上时游戏是大电流+高温放电，最伤电池；"
+                       "换 100W 以上电源、或让 PD 保护限帧/断独显把整机压到供电内"
+                       % (span_days, acd_wh, per_day(acd_wh)))
         if cyc is not None and len(keys) >= 2:
             adv.append("近 %d 天等效循环 %.2f 次（按放电能量折算）" % (len(keys), cyc))
         if not adv:
@@ -781,6 +801,7 @@ class BatteryCare:
             "deep_h": round(deep_h, 2), "full_h_day": round(per_day(full_h), 2),
             "hot_h_day": round(per_day(hot_h), 2), "deep_h_day": round(per_day(deep_h), 2),
             "charge_wh": round(ch_wh, 1), "discharge_wh": round(dis_wh, 1),
+            "ac_drain_wh": round(acd_wh, 1),
             "cycles_est": cyc,
         }
 

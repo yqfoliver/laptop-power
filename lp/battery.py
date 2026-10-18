@@ -271,9 +271,18 @@ class BatteryMonitor:
         self.voltage_v = round(bs.Voltage / 1000.0, 3) if bs.Voltage else None
         rate = bs.Rate / 1000.0
         # 本机固件放电时 Rate 报负值，统一成「放电为正、充电为负」
+        flags = self.state & (DISCHARGING | CHARGING)
         if (self.state & DISCHARGING) and rate < 0:
             rate = -rate
         elif (self.state & CHARGING) and rate > 0:
+            rate = -rate
+        elif not flags and rate < 0:
+            # 插电补电态（ACPI 两标志皆假）—— 2026-10-17/18 实测踩坑：
+            # Type-C 打游戏供不上时，PowerState 的充/放标志会同时翻假，
+            # 固件在该态沿袭「负 = 放电方向」上报（session 记录 machine 81.2W
+            # 时 Rate=-3.4W，而电池实际掉到了 5%）。不翻号就会被整条 PD
+            # 链路当成「在充电」：不标定上限、不定档、不预判、不压制，
+            # 电池一路补电到关机。满电搁置时 Rate≈0，翻不翻无歧义。
             rate = -rate
         # 钳制（2026-10-11）：固件偶尔吐哨兵值/坏值（如 0x80000000 换算出来
         # 的 -2147483 W）。这个数会被 PD 控制器当成「电池在补电」的直接判据，
@@ -353,18 +362,27 @@ class BatteryMonitor:
             discharging = not ac
             charging = ac and pct_fb is not None and pct_fb < 100
 
-        # 放电功率做 EWMA；AC 下清零，避免插上电后剩余时间还挂在旧值
-        if discharging and self.rate_w and self.rate_w > 0:
+        # 放电功率做 EWMA；充电/搁置清零，避免插上电后剩余时间还挂旧值。
+        # 判据用 rate_w>0 而不是 discharging 标志 —— 插电补电态标志是假的
+        # （见 _read_status），那种态下 EWMA 以前被清零，_pd_tick 只能拿到
+        # 单拍噪声值；现在补电放电也维护平滑值，PD 控制器优先用它。
+        if self.rate_w and self.rate_w > 0:
             self._rate_ewma = (self.RATE_ALPHA * self.rate_w
                                + (1 - self.RATE_ALPHA) * self._rate_ewma
                                if self._rate_ewma else self.rate_w)
-        elif not discharging:
+        else:
             self._rate_ewma = None
 
         pct = self.percent() if ok else pct_fb
         eta = self.eta_minutes()
         if eta is None and life_s:
             eta = int(round(life_s / 60.0))
+
+        # 插电补电（top-up）：插着电，电池却在替电源出力。ACPI 两标志皆假，
+        # 只有 rate 符号能看出来（_read_status 里已翻成正）。面板红字角标、
+        # 养护统计、PD 控制器都认这个信号。
+        topup = bool(ac and ok and not discharging and not charging
+                     and self.rate_w is not None and self.rate_w > 0.15)
 
         out = {
             "ok": bool(ok),
@@ -383,8 +401,10 @@ class BatteryMonitor:
             "charging": bool(charging),
             "critical": bool(self.state & CRITICAL) if ok else False,
             "eta_minutes": eta,
+            "topup": topup,
             "state_cn": ("放电中" if discharging else
                          "充电中" if charging else
+                         "插电补电中" if topup else
                          "已接电源" if ac else "未知"),
             "err": self.open_error,
         }

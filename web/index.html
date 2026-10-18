@@ -346,7 +346,15 @@ function renderBatt(){
 
   let eta = "预计剩余 —";
   if(!state.ac && B.eta_minutes) eta = "预计剩余 " + fmtDur(B.eta_minutes*60);
-  else if(state.ac) eta = B.charging ? "充电中" : "已充满，随时可拔";
+  else if(state.ac){
+    // AC 三态拆分（2026-10-18）：插电 ≠ 已充满。插电补电时 ACPI 的 charging
+    // 标志会翻假，旧逻辑直接显示「已充满，随时可拔」——5% 电量拔线就关机。
+    // rate>0.5 现在可信：battery.py 已把补电态的负 Rate 翻成正。
+    const _r = (B.rate_avg_w!=null?B.rate_avg_w:B.rate_w);
+    if(B.charging) eta = "充电中";
+    else if(B.discharging || (_r!=null && _r>0.5)) eta = "电池供电中 · 电源供不上";
+    else eta = "已充满或已到上限，随时可拔";
+  }
   let s = eta;
   if(B.health_pct!=null) s += " · 健康度 " + Math.round(B.health_pct) + "%";
   const care = B.care||{};

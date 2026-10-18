@@ -853,7 +853,15 @@ class NativePanel:
             eta_txt = "还可用 %s" % fmt_min(eta)
             etc = C_GREEN if eta >= 120 else (C_ORANGE if eta >= 45 else C_RED)
         elif ac:
-            eta_txt, etc = ("预计充满还需一会儿" if bi.get("charging") else "已充满，随时可拔"), C_SUB
+            # AC 三态拆分（2026-10-18）：插电≠已充满；补电放电时 charging 标志
+            # 会翻假，旧逻辑在 5% 电量显示「已充满，随时可拔」（拔线即关机）。
+            # rate>0.5 的判据现在可信：battery.py 已把补电态的负 Rate 翻正。
+            if bi.get("charging"):
+                eta_txt, etc = "预计充满还需一会儿", C_SUB
+            elif discharging or (rate is not None and rate > 0.5):
+                eta_txt, etc = "电池供电中 · 电源供不上", C_RED
+            else:
+                eta_txt, etc = "已充满或已到上限，随时可拔", C_SUB
         else:
             eta_txt, etc = "电量估算中…", C_SUB
         self._text(hdc, eta_txt, etc,

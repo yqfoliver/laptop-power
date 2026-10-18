@@ -96,6 +96,10 @@ class Manager:
         self._pd_at = 0.0
         self._pd_hz = 0                # 本模块降到的刷新率（0=未降）
         self._pd_dim = False            # 本模块是否压着亮度
+        # S4（2026-10-18）：PD 保护自己的「独显断电」请求。与档位级的
+        # force_igpu（weak 档）走同一条 GPU Eco 通道，但来源不同：
+        # 档位看「充电器能力」，这里看「前面三层用尽了还在放电」。
+        self._pd_gpu_off = False
         # Windows 节能模式让位（2026-10-17）：离电时若系统已把电源模式滑块
         # 压到「最佳能效」（Energy Saver 自动/手动触发），CPU 限频归 Windows
         # 统一管，工具不再叠加自己的 PROCTHROTTLEMAX —— 两层压制既无增益，
@@ -1103,7 +1107,8 @@ class Manager:
             except Exception:
                 pass
             if not (self.pd.enabled and ac):
-                if self.pd.active or self._pd_hz or self._pd_dim:
+                if self.pd.active or self._pd_hz or self._pd_dim \
+                        or self._pd_gpu_off:
                     self._pd_apply({"reset": True})
                     try:
                         self.pd.feed(False, None, 0.0)
@@ -1212,7 +1217,7 @@ class Manager:
             pass
 
     def _pd_apply(self, req: dict) -> None:
-        """执行 PD 保护动作（刷新率 / 亮度 / CPU 上限）。全部可逆，失败静默。"""
+        """执行 PD 保护动作（刷新率 / 亮度 / CPU 上限 / 独显断电）。全部可逆，失败静默。"""
         try:
             if req.get("reset"):
                 if self._pd_hz:
@@ -1224,6 +1229,7 @@ class Manager:
                 if self._pd_dim:
                     self._pd_dim = False
                     self._pd_brightness_restore()
+                self._pd_gpu_off = False
                 self._pd_write_proc_max()
                 return
             if req.get("refresh"):
@@ -1254,6 +1260,29 @@ class Manager:
                     self._pd_brightness_restore()
             if req.get("cpu_cap") is not None:
                 self._pd_write_proc_max()
+            if req.get("gpu_off"):
+                # S4：前面的手段用尽了还在放电 → 断独显换核显渲染。
+                # 能不能落地当场判：没核显（断了没输出）/ 系统平衡档（gpueco
+                # 一律不干预）/ 通道被禁/配置关掉，都要如实告诉状态机，
+                # 绝不能让它以为独显已经断了。
+                reason = ""
+                if not bool(self.cfg.get("pd_s4_gpu_off", True)):
+                    reason = "已在配置里关闭"
+                elif getattr(self, "current", None) == "balanced":
+                    reason = "系统平衡档不干预"
+                elif not self._igpu_available():
+                    reason = "无核显"
+                elif not self.gpu_eco.enabled:
+                    reason = "Eco 通道已关闭"
+                if reason:
+                    try:
+                        self.pd.gpu_off_failed(reason)
+                    except Exception:
+                        pass
+                else:
+                    self._pd_gpu_off = True
+            if req.get("gpu_on"):
+                self._pd_gpu_off = False
         except Exception:
             pass
 
@@ -1278,6 +1307,8 @@ class Manager:
         r = self.pd.report()
         r["hz_applied"] = self._pd_hz
         r["dim_applied"] = self._pd_dim
+        # S4 独显断电：pdbudget 是「决策」，这里是「是否已交给 GPU Eco 执行」
+        r["gpu_off_applied"] = bool(self._pd_gpu_off)
         try:
             if self.pdsrc is not None:
                 s = self.pdsrc.summary()
@@ -1532,10 +1563,14 @@ class Manager:
         ge.enabled = bool(self.cfg.get("gpu_eco_auto", True))
         # 弱电源（如 65W Type-C）：插电也把独显断掉，改用核显渲染。
         # 详见 gpueco.tick 的 force_off 说明。
+        # 三个来源取或：① 档位 force_igpu（weak 档，充电器能力不够）；
+        # ② PD 阶梯 S4（前三层用尽了还在放电，见 _pd_apply 的 gpu_off）；
+        # 二者都要求「插电 + 有核显」。
         force_off = False
         try:
             # 无核显机型不断电：断掉独显就没有输出设备了（黑屏）
-            force_off = bool(self.pd_tier_policy().get("force_igpu")) \
+            force_off = (bool(self.pd_tier_policy().get("force_igpu"))
+                         or self._pd_gpu_off) \
                 and bool(st.get("ac")) and self._igpu_available()
         except Exception as _e:
             self._err("gpueco.force_off", _e)
@@ -1583,8 +1618,10 @@ class Manager:
         mode, _src, _note, _tier = gp.classify(name)
         # 弱电源档（插电但供电不足）：不管内置名单怎么判，一律走核显。
         # 65W 下让独显跑 3D 必然持续从电池取电，比画质下降严重得多。
+        # PD 阶梯 S4 断独显时同理（正在运行的游戏也该用核显重开一局）。
         try:
-            if bool(self.pd_tier_policy().get("force_igpu")) \
+            if (bool(self.pd_tier_policy().get("force_igpu"))
+                    or self._pd_gpu_off) \
                     and bool(st.get("ac")) and self._igpu_available():
                 mode = "igpu"
         except Exception as _e:
