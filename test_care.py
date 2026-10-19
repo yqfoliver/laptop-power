@@ -63,9 +63,10 @@ def fresh(cfg=None, pc=None, path=None, chg=None):
 
 
 def batt(ac=True, charging=False, discharging=False, pct=50, rate=None,
-         full=50000):
+         full=50000, health=None):
     return {"ac": ac, "charging": charging, "discharging": discharging,
-            "percent": pct, "rate_w": rate, "full_mwh": full}
+            "percent": pct, "rate_w": rate, "full_mwh": full,
+            "health_pct": health}
 
 
 def tmp_json():
@@ -566,6 +567,50 @@ c2 = bc.BatteryCare({}, p, chg_reader=(lambda: dict(pay)))
 ok(c2.report().get("limit_pending") is True, "重启后 pending 仍在",
    c2.report().get("limit_state"))
 ok(c2.intent_active() is True, "重启后充满意图仍在")
+
+print("== 36. 满充容量按天落盘（历史没存过 -> 只能靠考古）==")
+c, _ = fresh({}, path=tmp_json())
+c.feed(batt(ac=True, pct=99, full=60536, health=82.9), 45.0, 60.0)
+b = c._data["days"][time.strftime("%Y-%m-%d")]
+ok(b.get("full_mwh") == 60536, "当天记下 full_mwh", b.get("full_mwh"))
+ok(b.get("health_pct") is not None, "同时记健康度", b.get("health_pct"))
+c.feed(batt(ac=True, pct=100, full=60400), 45.0, 60.0)
+b = c._data["days"][time.strftime("%Y-%m-%d")]
+ok(b.get("full_mwh") == 60400, "同日多次喂入取最后值", b.get("full_mwh"))
+st = c.report()["stat"]
+ok(st.get("cap_series") and st["cap_series"][-1][1] == 60400,
+   "stat 里带容量轨迹", st.get("cap_series"))
+r = c.report()
+ok(r.get("today", {}).get("full_mwh") == 60400, "report.today 同步快照",
+   r.get("today", {}).get("full_mwh"))
+
+print("== 37. 阶跃下跌 -> 提示区分「电量计重学习」与「真实衰减」==")
+c, _ = fresh({}, path=tmp_json())
+today = time.strftime("%Y-%m-%d")
+yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+c._data["days"] = {yesterday: {"full_mwh": 60536, "health_pct": 82.9,
+                               "full_soc_s": 0.0, "hot_charge_s": 0.0,
+                               "deep_s": 0.0, "charge_wh": 0.0,
+                               "discharge_wh": 0.0, "ac_drain_wh": 0.0,
+                               "sample_s": 0.0}}
+c.feed(batt(ac=True, pct=99, full=55244), 45.0, 60.0)
+st = c.report()["stat"]
+ok(st.get("cap_drop_wh") == round((60536 - 55244) / 1000.0, 1),
+   "首末掉幅 %.1f Wh" % st["cap_drop_wh"], st.get("cap_drop_wh"))
+adv = c.report()["advice"]
+ok(any("电量计重新学习" in a for a in adv),
+   "阶跃下跌提示电量计重学习，而不是直接判真实衰减", adv)
+
+print("== 38. 容量回升 -> 说明之前的下降是校准假象 ==")
+c, _ = fresh({}, path=tmp_json())
+c._data["days"] = {yesterday: {"full_mwh": 55244, "health_pct": 75.7,
+                               "full_soc_s": 0.0, "hot_charge_s": 0.0,
+                               "deep_s": 0.0, "charge_wh": 0.0,
+                               "discharge_wh": 0.0, "ac_drain_wh": 0.0,
+                               "sample_s": 0.0}}
+c.feed(batt(ac=True, pct=99, full=58900), 45.0, 60.0)
+adv = c.report()["advice"]
+ok(any("校准假象" in a for a in adv), "回升时给出反向结论", adv)
 
 print("\n结果：%d 通过 / %d 失败" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

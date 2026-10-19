@@ -234,7 +234,12 @@ class BatteryCare:
                  # 会漏掉整段弱电源游戏放电，但它真实参与循环老化，必须单独有桶
                  "ac_drain_wh": 0.0,
                  # 场景判定要区分插电/离电时长；intent_full_s 是「有目的的满充」
-                 "ac_s": 0.0, "dc_s": 0.0, "intent_full_s": 0.0}
+                 "ac_s": 0.0, "dc_s": 0.0, "intent_full_s": 0.0,
+                 # 容量快照（按天最后值，None=当天没读到）：固件报的
+                 # FullChargedCapacity / DesignedCapacity / 健康度。
+                 # 2026-10-19 之前没存 ⇒ 用户问「健康度掉了 5Wh 是不是读错了」
+                 # 只能去 transcript 考古；存了之后「哪天开始掉、掉多少」直接可答。
+                 "full_mwh": None, "design_mwh": None, "health_pct": None}
             days[key] = b
         return b
 
@@ -318,6 +323,24 @@ class BatteryCare:
         self._chg_tick()
         # 7) 复查刚下发的上限（EC 有 ~13min 延迟，且可能被厂商服务回滚）
         self._pending_tick(ac, pct)
+
+        # 8) 容量快照：固件 FullChargedCapacity / DesignedCapacity / 健康度，
+        #    按天记最后值。电量计会在深放+满充后重新学习（表现为阶跃），
+        #    日度轨迹是区分「真实衰减」与「电量计漂移」的唯一依据。
+        fm = batt.get("full_mwh")
+        if fm:
+            try:
+                fmv = int(fm)
+                if 1000 <= fmv <= 500000:        # 坏值保护
+                    b["full_mwh"] = fmv
+                    dm = batt.get("designed_mwh")
+                    if dm:
+                        b["design_mwh"] = int(dm)
+                    hp = batt.get("health_pct")
+                    if hp is not None:
+                        b["health_pct"] = round(float(hp), 1)
+            except Exception:
+                pass
 
         self._recompute(batt)
         self._save()
@@ -674,6 +697,15 @@ class BatteryCare:
         dis_wh = sum(float((days[k] or {}).get("discharge_wh") or 0) for k in keys)
         # 插电补电放电单列：口径上和「离电用电池」分开，但它是真实循环
         acd_wh = sum(float((days[k] or {}).get("ac_drain_wh") or 0) for k in keys)
+        # 满充容量日度轨迹（按天最后值）：电量计漂移 vs 真实衰减的判据。
+        # 阶跃式下跌 ≈ 深放+满充后电量计重新学习；持续缓降 ≈ 真实老化。
+        # 注意用**全部保留天数**（30 天）而不是评分的 7 天窗口——用户问的
+        # 「相比之前掉了 5Wh」往往是 7 天以外的旧事。
+        cap_series = []
+        for k in sorted(days.keys()):
+            v = (days[k] or {}).get("full_mwh")
+            if v:
+                cap_series.append([k, int(v)])
 
         full_h, hot_h, deep_h = self._h(full_s), self._h(hot_s), self._h(deep_s)
         span_days = max(1, len(keys))
@@ -785,6 +817,21 @@ class BatteryCare:
                 adv.append("上次下发的上限 %s%% 还没看到生效（%s）→ 厂商服务可能要更久，"
                            "也可直接在 MyASUS 里确认" % (v, note))
 
+        # ---- 满充容量趋势（2026-10-19：阶跃下跌=电量计重学习，缓降=真实老化）----
+        if len(cap_series) >= 2:
+            d0, v0 = cap_series[0]
+            d1, v1 = cap_series[-1]
+            drop = v0 - v1
+            if drop >= 1500:
+                adv.append("满充容量轨迹 %s→%s：%d→%d mWh（掉 %.1f Wh）。"
+                           "阶跃式下跌多半是电量计重新学习（深放+满充后修正陈旧乐观值），"
+                           "做一次完整充放校准即可确认；若校准后仍低就是真实衰减，"
+                           "重点压「充电上限」和「高温充电」"
+                           % (d0[5:], d1[5:], v0, v1, drop / 1000.0))
+            elif drop <= -1500:
+                adv.append("满充容量回升 %.1f Wh（%d→%d mWh）：电量计重新学习完成，"
+                           "之前的「下降」是校准假象" % (-drop / 1000.0, v0, v1))
+
         # ---- 满充校准（电量计需要端点修正，长期不充满会漂移）----
         if self.calib_due() and not intent_on:
             n = self.calib_days_since()
@@ -803,6 +850,10 @@ class BatteryCare:
             "charge_wh": round(ch_wh, 1), "discharge_wh": round(dis_wh, 1),
             "ac_drain_wh": round(acd_wh, 1),
             "cycles_est": cyc,
+            # 满充容量轨迹：[["MM-DD", mWh], ...]（按天最后值）+ 首末掉幅
+            "cap_series": cap_series,
+            "cap_drop_wh": (round((cap_series[0][1] - cap_series[-1][1]) / 1000.0, 1)
+                            if len(cap_series) >= 2 else None),
         }
 
     def report(self) -> Dict:
