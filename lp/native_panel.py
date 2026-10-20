@@ -956,9 +956,11 @@ class NativePanel:
             tip_txt = "耗电排行采样中…"
             tip_col = C_SUB
         else:
-            # 插电时这一行空闲：用来放电池养护建议（文献：满充搁置/高温充电/深放）
-            adv = (care.get("advice") or [])
-            tip_txt = ("电池养护：" + adv[0]) if care.get("enabled") and adv else ""
+            # 插电时这一行空闲：用来放电池养护短行（满充搁置/高温充电/深放）
+            # 只放 advice_short（一句「问题+动作」）；没事就空着不出现，
+            # 完整建议在 care.advice（CLI/日志）。
+            short = care.get("advice_short") or ""
+            tip_txt = ("电池养护：" + short) if care.get("enabled") and short else ""
             tip_col = C_ORANGE if tip_txt else C_SUB
         if tip_txt:
             self._text(hdc, tip_txt, tip_col,

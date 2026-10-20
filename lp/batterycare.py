@@ -117,6 +117,9 @@ class BatteryCare:
         self._relief_charge = False          # 本次降温由「充电高热」触发
         self._relief_thermal = False         # 本次降温由「插电高温」触发
         self._advice: List[str] = []
+        # 面板专用短行（web + native 共用）：没事就空着=不出现；有事也
+        # 只给一句「问题+动作」，MyASUS 点哪里的长路径只进 advice/CLI。
+        self._adv_short = ""
         self._score = None
         self._today_key = self._day_key()
         # 华硕「电池健康充电」上限（只读镜像值）。测试用 chg_reader 注入以保持隔离。
@@ -261,6 +264,7 @@ class BatteryCare:
         if not self.enabled:
             self.relief_off(reason="电池养护已关闭，还原 CPU 上限")
             self._advice = []
+            self._adv_short = ""
             self._score = None
             return self.report()
 
@@ -842,6 +846,38 @@ class BatteryCare:
             else:
                 adv.append("距上次满充校准已 %d 天（周期 %d 天）→ 该做一次完整充放来修正 SOC 漂移"
                            % (n, self.calib_days))
+        # ---- 面板专用短行（advice_short）----
+        # advice 全文是给「想细看」的人（CLI/日志）用的；web 与 native 面板
+        # 只有一行位置，advice[0] 动辄上百字 ⇒ 2026-10-20 用户要求「简化甚至
+        # 不出现」。规则：
+        #   ① 没有值得动手的事就空着（健康时不刷存在感）；
+        #   ② 有事也只给一句 ≤30 字的「问题 + 动作」；「MyASUS 点哪里」这类
+        #      操作路径只留在 advice / CLI——面板上「回养护 80%」按钮一键可办。
+        # 优先级：上限写入翻车（要用户立刻处理）> 深放（不可逆）> 满充搁置
+        # （有「回养护」一键按钮、且通常是最大扣分项）> 高温充电 > 插电补电 >
+        # 容量阶跃。
+        short = ""
+        stt = (self._limit_state or {}).get("state")
+        if stt in ("rolled_back", "need_admin", "failed", "unconfirmed"):
+            short = "充电上限改动未生效 · 请在 MyASUS 里确认"
+        elif per_day(deep_h) >= 0.5:
+            short = "深放日均 %.1fh → %d%% 左右就该补电" % (
+                per_day(deep_h), max(20, int(self.deep_soc) + 15))
+        elif (per_day(full_h) >= 1.0 and not limited and sc != "mobile"
+                and not intent_on and chg_v is not None
+                and chg_v > (self.target_limit or self.advise_limit)):
+            short = "满充搁置 %.1fh/天 · 上限可压到 %d%%" % (
+                per_day(full_h), self.target_limit or self.advise_limit)
+        elif per_day(hot_h) >= 0.5:
+            short = "充电高温日均 %.1fh · 充电时避开重负载" % per_day(hot_h)
+        elif acd_wh >= 5.0:
+            short = "插电补电 %.0fWh · 电池在替电源出力" % acd_wh
+        elif len(cap_series) >= 2 \
+                and (cap_series[0][1] - cap_series[-1][1]) >= 1500:
+            short = "满充容量掉 %.1fWh · 做一次满充校准" % (
+                (cap_series[0][1] - cap_series[-1][1]) / 1000.0)
+        self._adv_short = short
+
         self._advice = adv
         self._stat = {
             "days": len(keys), "full_h": round(full_h, 2), "hot_h": round(hot_h, 2),
@@ -862,6 +898,7 @@ class BatteryCare:
             "enabled": self.enabled,
             "score": self._score,
             "advice": list(self._advice),
+            "advice_short": self._adv_short,
             "stat": dict(getattr(self, "_stat", {}) or {}),
             "relief_on": self._relief_on,
             "relief_reason": self._relief_reason,

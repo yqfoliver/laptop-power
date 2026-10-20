@@ -612,5 +612,48 @@ c.feed(batt(ac=True, pct=99, full=58900), 45.0, 60.0)
 adv = c.report()["advice"]
 ok(any("校准假象" in a for a in adv), "回升时给出反向结论", adv)
 
+print("== 39. 面板短行：健康时不出现（用户要求「简化甚至不出现」）==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+seed_days(c, dc_h=6.0, ac_h=2.0)      # 常带出门 + 80% 上限，习惯良好
+c.feed(batt(ac=True, pct=60, full=60536, health=82.9), 45.0, 60.0)
+ok(c.report().get("advice_short") == "", "习惯良好 -> 短行为空（整行不出现）",
+   c.report().get("advice_short"))
+
+print("== 40. 满充搁置 + 上限 100% -> 一句短行，不是一百字长文 ==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_100)
+seed_days(c, dc_h=0.5, ac_h=10.0, full_h=4.0)   # 日均满充搁置 4h
+c.feed(batt(ac=True, pct=99, full=55244, health=75.7), 45.0, 60.0)
+s = c.report().get("advice_short") or ""
+ok("满充搁置" in s and "80" in s, "短行含问题+动作: %r" % s)
+ok(len(s) <= 30, "短行 ≤30 字: %d 字" % len(s), len(s))
+ok("MyASUS" not in s, "短行不带 MyASUS 点击路径（面板按钮一键可办）", s)
+ok(any(len(a) > len(s) for a in c.report()["advice"]),
+   "CLI 仍保留完整长建议", c.report()["advice"][:1])
+
+print("== 41. 上限已压到目标档位 -> 不再唠叨（短行同样为空）==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+seed_days(c, dc_h=0.5, ac_h=10.0, full_h=4.0)
+c.feed(batt(ac=True, pct=79, full=55244, health=75.7), 45.0, 60.0)
+ok(c.report().get("advice_short") == "", "已压到 80% -> 不刷存在感",
+   c.report().get("advice_short"))
+
+print("== 42. 深放优先于满充搁置（不可逆损伤排最前）==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_100)
+seed_days(c, dc_h=0.5, ac_h=10.0, full_h=4.0)
+for k in list(c._data["days"]):
+    c._data["days"][k]["deep_s"] = 10800.0     # 每天深放 3h（≤20%）
+c.feed(batt(ac=True, pct=99, full=55244, health=75.7), 45.0, 60.0)
+s = c.report().get("advice_short") or ""
+ok("深放" in s, "深放排最前: %r" % s)
+ok(len(s) <= 30, "依然短: %d 字" % len(s), len(s))
+
+print("== 43. 上限写入翻车 -> 短行直说（否则用户不知道按钮白点了）==")
+c, _ = fresh({}, path=tmp_json(), chg=ASUS_80)
+seed_days(c, dc_h=0.5, ac_h=10.0, full_h=4.0)
+c._set_limit_state(100, "rolled_back", "被厂商服务改回")
+c.feed(batt(ac=True, pct=99, full=55244, health=75.7), 45.0, 60.0)
+s = c.report().get("advice_short") or ""
+ok("未生效" in s and "MyASUS" in s, "翻车时短行给指路: %r" % s)
+
 print("\n结果：%d 通过 / %d 失败" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

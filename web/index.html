@@ -408,8 +408,10 @@ function renderBatt(){
       else if(pd.supply_w - (pd.machine_w||0) < 8) t += "\n余量吃紧，即将自动限帧保电池";
       advText = t;
     }
-  }else if(care.enabled && care.advice && care.advice.length){
-    advText = "电池养护：" + care.advice[0];
+  }else if(care.enabled && care.advice_short){
+    // 面板只放一句短行（满充搁置 4.0h/天 · 上限可压到 80% 这种）；
+    // 没有值得提醒的事就整行不出现。完整建议列表在 care.advice（CLI 用）。
+    advText = "电池养护：" + care.advice_short;
   }
   ok.textContent = okText;
   adv.textContent = advText;
