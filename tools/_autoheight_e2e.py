@@ -29,9 +29,30 @@ LONG_ADVICE = ("你常带出门（日均离电 6.0h）但上限只到 80% → �
                "否则 SOC 漂移会出现「显示 30% 突然关机」。"
                "近期若有出行计划，出发前记得充满；长期插电时再切回养护上限即可。")
 
+def _bi(ac, pct, care):
+    """真实 battery_info 的必要字段（renderBatt 会读的那些）。
+    旧夹具只放 display_hz/care，percent/eta/健康度/容量全是 undefined，
+    电池卡量到的不是真实高度。取用户 10-20 截图的真实数值。"""
+    return {"ok": True, "present": True, "ac": ac, "percent": pct,
+            "capacity_mwh": 26500, "full_mwh": 55244,
+            "designed_mwh": 73000, "health_pct": 75.7, "cycles": None,
+            "voltage_v": 15.9, "rate_w": 25.6, "rate_avg_w": 25.8,
+            "charging": ac, "discharging": not ac, "topup": False,
+            "critical": False, "eta_minutes": None if ac else 174,
+            "state_cn": "充电中" if ac else "放电中",
+            "display_hz": 165, "display_orig_hz": 165,
+            "display_available": [60, 165], "display_changed": False,
+            "display_err": "", "top_procs": [], "brightness_applied": None,
+            "brightness_dimmed": False, "brightness_cap": 45,
+            "care": care}
+
+
 CARE_WORST = {
     "enabled": True, "score": 88, "advice": [LONG_ADVICE,
                                              "距上次满充校准已 45 天（周期 30 天）→ 该做一次完整充放来修正 SOC 漂移"],
+    # 2026-10-20：面板只渲染 advice_short，长 advice 退居 CLI。
+    # 夹具要跟着真实数据结构走，否则量到的不是面板实际高度。
+    "advice_short": "满充搁置 4.0h/天 · 上限可压到 80%",
     "charge_line": "充电上限：100%（已下发，待生效）",
     "limit_state": {"value": 100, "state": "pending", "note": "已下发，等待 EC 生效"},
     "limit_pending": True,
@@ -60,10 +81,11 @@ GPU_WORST = {
 
 STATUS = {
     "mode": "office", "auto": True, "ac": True,
-    "battery": {"percent": 99, "ac": True, "charging": True,
-                "rate_w": -12.4, "health": 84, "full_mwh": 61500,
-                "charge_mwh": 60800, "cycle": 112},
-    "battery_info": {"display_hz": 165, "care": CARE_WORST},
+    # 与真实 status() 对齐：battery 是**数字**（st.get("battery_percent")），
+    # 不是 dict——旧夹具写成 dict，页面渲染出「🔋 [object Object]%」
+    "battery": 99,
+    "reason": "使用电池 · explorer · 轻负载",
+    "battery_info": _bi(True, 99, CARE_WORST),
     "alloc": {"enabled": True, "verdict_cn": "中等负载", "cpu_w": 42.1,
               "gpu_w": None, "system_w": 54.2, "gpu_temp": 49,
               "gpu_util": 0, "cpu_temp": 93, "envelope_w": 110,
@@ -72,8 +94,15 @@ STATUS = {
            "supply_src": None, "machine_w": 41.0,
            "force_igpu": False},
     "gpu_eco": {"eco": 0},
+    # thermal 的真实键是 mode（thermal.summary()），不是 asus_mode——
+    # 旧夹具写 as_mode 导致「华硕性能模式」隐藏规则从来没被真正验证过。
+    # LONG：工具 perf 档 + 厂商「全速」→ 一致 → 标签隐藏（trim 目标）。
     "thermal": {"fan_cpu": 38, "fan_gpu": 37, "cpu_c": 93, "gpu_c": 49,
-                "asus_mode": "full"},
+                "mode": "perf", "label": "性能优先"},
+    # renderThermal 读的是顶层 state.fan（不是 state.thermal）
+    "fan": {"available": True, "source": "ACPI", "fan_cpu": 38, "fan_gpu": 37,
+            "temp_cpu": 93, "temp_gpu": 49, "perf_mode": "full",
+            "perf_label": "全速"},
     "load": {"cpu": 28, "disk": 5, "net": 24, "gpu": 0},
     "gpupick": GPU_WORST,
 }
@@ -91,11 +120,12 @@ CARE_SHORT = {
     "full_limit": 100, "calib_due": True, "calib_days_since": 45,
 }
 SHORT_STATUS = {
-    "mode": "office", "auto": True, "ac": True,
-    "battery": {"percent": 95, "ac": True, "charging": True,
-                "rate_w": -8.1, "health": 84, "full_mwh": 61500,
-                "charge_mwh": 58400, "cycle": 112},
-    "battery_info": {"display_hz": 165, "care": CARE_SHORT},
+    "mode": "office", "auto": True,
+    # 同 STATUS：battery 是数字；short 夹具复刻用户 10-20「离电 48%」那张截图
+    "battery": 48,
+    "ac": False,
+    "reason": "使用电池 · explorer · 轻负载",
+    "battery_info": _bi(False, 48, CARE_SHORT),
     "alloc": {"enabled": True, "verdict_cn": "判定中", "cpu_w": None,
               "gpu_w": None, "system_w": None, "gpu_temp": None,
               "gpu_util": 0, "cpu_temp": None, "envelope_w": 110,
@@ -104,10 +134,16 @@ SHORT_STATUS = {
     "pd": {"active": False, "tier": "unknown", "supply_w": 82,
            "supply_src": "本次实测（充电下界）", "machine_w": 41.0,
            "force_igpu": False},
-    "gpu_eco": {"eco": 0},
+    # 离电 + 独显已断电：复刻用户 10-20 截图（「独显 —」噪音行的来源）
+    "gpu_eco": {"eco": 1},
+    # SHORT：工具 auto 档 + 厂商「全速」→ 不一致 → 标签显示
+    # （复刻用户 10-20 截图里那行，验证「只有真信号才出现」的另一半）
     "thermal": {"fan_cpu": 38, "fan_gpu": 37, "cpu_c": 93, "gpu_c": 49,
-                "asus_mode": "full"},
-    "load": {"cpu": 28, "disk": 5, "net": 24, "gpu": 0},
+                "mode": "auto", "label": "自动"},
+    "fan": {"available": True, "source": "ACPI", "fan_cpu": 38, "fan_gpu": 37,
+            "temp_cpu": 93, "temp_gpu": 49, "perf_mode": "full",
+            "perf_label": "全速"},
+    "load": {"cpu": 28, "disk": 5, "net": 24, "gpu": None},
     "gpupick": {"enabled": True, "current": {"process": "explorer.exe",
                "mode": "dgpu", "src": "builtin"}},
 }
@@ -116,7 +152,11 @@ SHORT_STATUS = {
 class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/status"):
-            payload = SHORT_STATUS if "short" in self.path else STATUS
+            # 页面固定轮询 /api/status（不带 query），short 场景只能靠
+            # Referer 区分：Edge 同源 fetch 默认会带完整 Referer。
+            # 曾因只查 self.path 导致 short 夹具从来没被真正喂到页面里过。
+            ref = self.headers.get("Referer") or ""
+            payload = SHORT_STATUS if ("short" in self.path or "short" in ref) else STATUS
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

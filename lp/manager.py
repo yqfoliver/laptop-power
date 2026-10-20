@@ -669,9 +669,14 @@ class Manager:
         on_battery = not st.get("ac")
         knobs = {}
         for k, meta in KNOBS.items():
-            s = plan.get(meta[1][0])
-            if s is None:
-                s = plan.get(meta[1][1])
+            # 别名可能只有 1 个（gpu_pref/pmf/wifi_saver…）：按顺序试到有为止，
+            # 不能无脑取 meta[1][1] —— 计划里缺这个设置时 IndexError 会把
+            # 整个 status()（面板 API 的支撑）炸掉（2026-10-20 实测踩到）
+            s = None
+            for alias in meta[1]:
+                s = plan.get(alias)
+                if s is not None:
+                    break
             knobs[k] = {"name": meta[0], "value": s.current(on_battery) if s else None,
                         "options": dict(s.options) if s else {}}
         cur = self.current and self.current in PROFILES and self.current or "balanced"

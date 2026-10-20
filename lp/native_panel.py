@@ -607,7 +607,9 @@ class NativePanel:
         if snap.get("energy_saver"):
             reason = ((reason + " · ") if reason else "") + "Windows 节能模式接管 CPU 限频"
         if reason:
-            self._text(hdc, "原因：" + reason, C_SUB,
+            # 不写「原因：」前缀——模式标题和指示灯 chip 已交代上下文，
+            # 三个装饰字纯噪音（2026-10-20 UI 精简，web 端同步）
+            self._text(hdc, reason, C_SUB,
                        RECT(pad + S(16), y + S(44), W - pad - S(16), y + card_h - S(6)),
                        size_px=S(11), flags=DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS)
 
@@ -694,7 +696,13 @@ class NativePanel:
                    RECT(pad + S(16), y + S(8), pad + S(120), y + S(28)),
                    size_px=S(12), weight=FW_SEMIBOLD)
         pm_label = fan.get("perf_label") or ""
-        self._text(hdc, ("华硕性能模式：%s" % pm_label) if pm_label else "华硕性能模式：—",
+        # 与 web 端同规则：右侧三个按钮能表态时这行是冗余；只有面板模式
+        # 与厂商模式不一致（外部改了 MyASUS）才显示
+        _TMAP = {"auto": ("自动", "平衡"), "quiet": ("静音", "安静", "节能"),
+                 "perf": ("全速", "性能")}
+        _sel = _TMAP.get(th.get("mode") or "", ())
+        _match = (not pm_label) or any(s in pm_label for s in _sel)
+        self._text(hdc, ("华硕性能模式：%s" % pm_label) if not _match else "",
                    C_SUB, RECT(W // 2, y + S(8), W - pad - S(16), y + S(28)),
                    size_px=S(10), flags=DT_SINGLELINE | DT_VCENTER | DT_RIGHT)
 
@@ -781,7 +789,10 @@ class NativePanel:
         line_y += S(30)
         areason = alloc.get("reason") or ""
         if not ac:
-            areason = "离电中：分配器停用，整机功耗以电池遥测为准"
+            # 离电时分配理由整行去掉：右上角判定已写「非游戏档」，独显行也
+            # 标着「已断电/休眠」，再说一遍「分配器停用」是重复噪音
+            # （2026-10-20 UI 精简，web 端同步）
+            areason = ""
         env_short = alloc.get("env_short") or []
         if env_short and ac:
             areason = (areason + " · " + env_short[0]) if areason else env_short[0]

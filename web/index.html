@@ -34,13 +34,6 @@
   h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.2px}
   .sub{font-size:10.5px;color:var(--muted);margin-top:1px;
        white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px}
-  .htips{margin-left:auto;display:flex;gap:5px;flex:none}
-  .chip{font-size:10.5px;padding:3px 8px;border-radius:5px;background:var(--card2);
-        color:var(--muted);white-space:nowrap}
-  .chip.power{background:var(--accent-soft);color:var(--accent);font-weight:600}
-  .chip.batt.good{background:#15301F;color:var(--green);font-weight:600}
-  .chip.batt.warn{background:#33280F;color:var(--amber);font-weight:600}
-  .chip.batt.low{background:#3A1A1C;color:var(--red);font-weight:600}
 
   .hero{padding:8px 10px}
   .hero .mode{font-size:16px;font-weight:700;letter-spacing:.2px}
@@ -137,17 +130,13 @@
       <h1>笔记本电源自适应</h1>
       <div class="sub" id="fg">—</div>
     </div>
-    <div class="htips">
-      <span class="chip power" id="power">—</span>
-      <span class="chip batt good" id="batt">—</span>
-    </div>
   </header>
 
   <div class="card hero">
     <span class="autoTag" id="autoTag">自动判定</span>
     <div class="mode" id="mode">—</div>
     <div class="desc" id="reason"></div>
-    <div class="esaverNote" id="esaverNote" hidden>⚡ Windows 节能模式接管 CPU 限频 · 工具暂让位（卡顿/变慢来源于系统节能）</div>
+    <div class="esaverNote" id="esaverNote" hidden>⚡ 系统节能模式接管 CPU 限频 · 工具暂让位（卡顿来自系统节能）</div>
   </div>
 
   <div class="modes" id="modes"></div>
@@ -284,7 +273,9 @@ function render(){
     else document.documentElement.style.zoom = "";
   }catch(e){}
   document.getElementById("mode").textContent = state.mode_label||"—";
-  document.getElementById("reason").textContent = "原因：" + (state.reason||"—");
+  // 不写「原因：」前缀：模式标题 + 右下「前台 xxx」已经交代上下文，
+  // 三个装饰字纯噪音（2026-10-20 UI 精简，native 同步）
+  document.getElementById("reason").textContent = state.reason||"—";
   // Windows 节能模式让位提示（2026-10-17）：只在系统真的在替我们限频时出现
   try{ document.getElementById("esaverNote").hidden = !state.energy_saver; }catch(e){}
   const auto = state.auto;
@@ -297,18 +288,9 @@ function render(){
 
   try{ renderGpuPick(); }catch(e){ document.title = "面板渲染异常(GP): " + ((e&&e.message)||e); }
 
-  const p = document.getElementById("power");
-  // 只显示电源状态；电量在旁边 🔋 chip 里（两个 chip 都带 % 就重复了）
-  p.textContent = state.ac ? "插电" : "离电";
-  const b=document.getElementById("batt");
-  // 顶部 chip 统一显示电量百分比（「已接电源」四个字电池卡标题里已有，别重复）
-  if(state.battery===null||state.battery===undefined){
-    b.textContent = state.ac ? "电源" : "电池";
-    b.className="chip batt";
-  }else{
-    b.textContent="🔋 "+state.battery+"%";
-    b.className="chip batt "+(state.ac?"good":(state.battery>50?"good":state.battery>20?"warn":"low"));
-  }
+  // 头部不再放「插电 / 🔋48%」chip：电池卡标题（已接电源/电池 48% 放电中）
+  // 和大进度条是电池信息的唯一归属，头部再报一遍纯重复（2026-10-20
+  // UI 精简）。头部只剩标题 + 前台程序。
   const fgEl = document.getElementById("fg");
   if(state.foreground){
     // 去掉 .exe 后缀；不再拼《窗口标题》—— 标题又长又和程序名重复
@@ -448,11 +430,10 @@ function renderCharge(care){
   if(care.intent_active){
     t += " · 本次允许充满（" + (CHG_REASON[(care.intent||{}).reason] || "手动") + "）"
        + " · 拔电用到 90% 以下自动结束";
-  }else{
-    const SC = {desk:"长期插电", mobile:"常带出门", unknown:"习惯判定中"};
-    const scn = SC[care.scene];
-    if(scn) t += " · " + scn;
-    if(care.calib_due) t += " · 该做满充校准了";
+  }else if(care.calib_due){
+    // 2026-10-20 UI 精简：场景尾巴（长期插电/常带出门）撤掉——advice 里
+    // 已经说清；满充校准是面板上唯一的提醒位，压成 6 个字留下
+    t += " · 该做满充校准";
   }
   line.textContent = t;
 }
@@ -481,9 +462,12 @@ function renderLoad(){
   bar.style.background = b>=70 ? "var(--red)" : b>=40 ? "#BA7517" : "var(--green)";
   document.getElementById("loadPct").textContent = b + "%";
   const f = v => (v===null||v===undefined) ? "—" : Math.round(v)+"%";
-  document.getElementById("loadDetail").textContent =
-    "CPU " + f(L.cpu) + " · 磁盘 " + f(L.disk) + " · 网络 " + f(L.net) + " · 独显 " + f(L.gpu)
-    + (state.cooldown_left>0 ? " · 冷却 "+state.cooldown_left+"s" : "");
+  // 独显已断电时「独显 —」是纯噪音（功耗卡里已经写着「已断电」）
+  const gpuOff = (state.gpu_eco||{}).eco === 1;
+  const segs = ["CPU " + f(L.cpu), "磁盘 " + f(L.disk), "网络 " + f(L.net)];
+  if(!gpuOff) segs.push("独显 " + f(L.gpu));
+  if(state.cooldown_left>0) segs.push("冷却 " + state.cooldown_left + "s");
+  document.getElementById("loadDetail").textContent = segs.join(" · ");
 }
 
 function renderThermal(){
@@ -496,8 +480,14 @@ function renderThermal(){
   if(fan.fan_gpu!=null) bits.push("GPU 风扇 "+pctv(fan.fan_gpu));
   if(fan.temp_cpu!=null) bits.push(degv(fan.temp_cpu));
   document.getElementById("thFan").textContent = bits.length? bits.join(" · ") : "风扇 —";
+  // 「华硕性能模式：全速」和右侧三个按钮说的是同一件事——按钮能表态时
+  // 这行纯冗余（2026-10-20 UI 精简）；只有外部改了 MyASUS、与工具当前
+  // 档位不一致时才显示，那时它才是真信号。
+  const TMAP = {auto:["自动","平衡"], quiet:["静音","安静","节能"], perf:["全速","性能"]};
+  const tsel = TMAP[th.mode] || [];
+  const tmatch = tsel.some(s => fan.perf_label && fan.perf_label.indexOf(s) >= 0);
   document.getElementById("thAsus").textContent =
-    "华硕性能模式：" + (fan.perf_label || "—");
+    (fan.perf_label && !tmatch) ? ("华硕性能模式：" + fan.perf_label) : "";
   const cur = th.mode||"auto";
   [["thAuto","auto"],["thQuiet","quiet"],["thPerf","perf"]].forEach(([id,m])=>{
     const btn=document.getElementById(id);
@@ -515,7 +505,7 @@ function renderAlloc(){
   }else{
     el.textContent = A.verdict_cn || "判定中";
     el.className = "r";
-    if(!state.ac) el.textContent = "非游戏档，不参与功耗重分配";
+    if(!state.ac) el.textContent = "非游戏档";
   }
   const set = (id, barid, tid, val, denom, temp, color) => {
     const el = document.getElementById(id);
@@ -544,8 +534,11 @@ function renderAlloc(){
   }
   const ev = (A.events && A.events.length) ? A.events[A.events.length-1] : "";
   const whyEl = document.getElementById("allocWhy");
-  // 底部行：去掉「本次判断：」前缀；与右上角完全相同时不再重复一遍
-  const why = (A.reason && A.reason !== el.textContent) ? A.reason : "";
+  // 底部行：插电时保留分配理由；**离电时整行让位**——「非游戏档」已经写
+  // 在右上角，理由行再说一遍「离电中：独显休眠…分配器停用」是重复噪音
+  // （2026-10-20 UI 精简）。有「最近动作」事件时例外，那才是新信息。
+  let why = "";
+  if(state.ac && A.reason && A.reason !== el.textContent) why = A.reason;
   whyEl.textContent = why + (ev ? (why ? " ｜ " : "") + "最近动作 " + ev : "");
 }
 
@@ -592,8 +585,10 @@ function renderGpuPick(){
   show(document.getElementById("gpAuto"), pinned);
   show(document.getElementById("gpProbe"), unknown && !!cur.path);
   const extra = [];
+  // 「名单外，自动不干预」不再进 extra——上一行的 src 已经写着「名单外」，
+  // 重复一遍只是把括号撑长（2026-10-20 UI 精简）。面板当前台的提示保留：
+  // 它解释「按钮点了为什么没反应」。
   if(cur.stale && cur.process) extra.push("面板当前台，操作对象是上一个程序");
-  if(unknown && cur.process) extra.push("名单外，自动不干预");
   window.__gpExtra = extra.length ? ("（" + extra.join(" · ") + "）") : "";
   const pr = g.probe;
   if(pr && pr.running){
