@@ -289,6 +289,16 @@ def test_supply_learning():
     pd2.feed(True, 0.0, 5.0, machine_w=99999.0)
     ok(pd2.supply_w is None, "异常整机功耗被丢弃: %s" % pd2.supply_w)
 
+    # 弱电源实到（2026-10-21）：整机 32W、电池补电 13.9W ⇒ 电源实到 18.1W
+    # （Type-C 只协商到 ~20W 档）。旧下限 25W 把这种真值当异常丢掉：
+    # supply 停在假的 73.2W、档位 unknown、面板「供电能力未测定」，
+    # 而电池正在被放空。放电标定是精确上界，不该有 25W 门槛。
+    pd3 = PdBudget(cfg())
+    pd3.feed(True, 13.9, 5.0, machine_w=32.0)
+    ok(pd3.supply_w is not None and abs(pd3.supply_w - 18.1) < 0.01,
+       "18W 级实到电源不再被下限丢掉: %s" % pd3.supply_w)
+    ok(pd3.supply_firm, "弱电源放电标定同样是 firm: %s" % pd3.supply_firm)
+
 
 def test_supply_jump_guard():
     print("== 学习跳变保护（2026-10-08：坏值把 89W 棘轮顶到 146.9W）==")

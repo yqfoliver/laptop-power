@@ -173,6 +173,16 @@ class BatteryMonitor:
 
     INFO_TTL = 300.0          # 「设计/满充容量」这类静态信息 5 分钟刷一次就够
     RATE_ALPHA = 0.3          # 放电功率 EWMA：压掉瞬时尖峰，剩余时间才不跳
+    # 容量趋势纠偏（2026-10-21）：固件撒谎时，唯一不会骗人的方向信号就是
+    # 剩余容量趋势。容量字段按 ~1% 量化（本机 ≈611mWh/步、约 60~90s 才跳
+    # 一格），窗口太短会把量化 blip 当成掉电 —— 150s + 500mWh + 无回抬
+    # 三个条件一起才改判。
+    CAP_TREND_WIN_S = 150.0       # 趋势窗口：持续这么久才算数
+    CAP_TREND_MIN_N = 5           # 窗口内最少采样数
+    CAP_TREND_MIN_DROP_MWH = 500.0  # 窗口内净变化下限（≈1% 量化步长）
+    CAP_TREND_MIN_W = 2.0         # 折算成功率也要超过噪声底
+    CAP_TREND_TOL_MWH = 100.0     # 窗口内允许的反向余量（挡量化 blip）
+    CAP_TREND_KEEP = 40           # 历史保留条数（5s 一拍 ≈ 200s）
 
     def __init__(self):
         self.present = False
@@ -192,6 +202,11 @@ class BatteryMonitor:
         self._rate_ewma = None
         self._fail = 0
         self._next_try = 0.0
+        # 容量趋势历史：[(t, capacity_mwh)]，新的在尾部。_claim 记录上一拍
+        # 「声称充电」的状态，变沿（刚插电/刚拔电）时历史作废重新攒窗口。
+        self._cap_hist = []
+        self._claim = None
+        self._trend_override = ""     # 本拍是否被趋势改判（诊断/面板用）
 
     # ---------------------------------------------------------- 打开/关闭
     def _open(self) -> bool:
@@ -294,6 +309,35 @@ class BatteryMonitor:
             self.rate_w = round(rate, 3)
         return True
 
+    # ---------------------------------------------------------- 容量趋势
+    def _cap_trend_w(self, rising: bool = False):
+        """趋势窗口内的平均功率（W）；条件不满足返回 None。
+
+        rising=False：净**下降**（掉电）⇒ 返回正数（放电功率口径）
+        rising=True ：净**上升**（充电）⇒ 返回正数（充电功率口径）
+
+        这是「固件在撒谎」时的方向硬证据：窗口内净变化 ≥ 500mWh、跨度
+        ≥ 150s、且中途不允许出现超过 100mWh 的反向回抬。电量计重锚定是
+        一次性跳变（随后平稳），量化 blip 会翘回来，两个都被挡掉。
+        """
+        h = self._cap_hist
+        if len(h) < self.CAP_TREND_MIN_N:
+            return None
+        t0, c0 = h[0]
+        t1, c1 = h[-1]
+        span = t1 - t0
+        if span < self.CAP_TREND_WIN_S:
+            return None
+        delta = (c1 - c0) if rising else (c0 - c1)
+        if delta < self.CAP_TREND_MIN_DROP_MWH:
+            return None
+        for _, c in h[1:]:
+            if rising and c < c0 - self.CAP_TREND_TOL_MWH:
+                return None
+            if (not rising) and c > c0 + self.CAP_TREND_TOL_MWH:
+                return None
+        return delta / 1000.0 / (span / 3600.0)
+
     # ---------------------------------------------------------- 对外
     def health_pct(self):
         if self.full_mwh and self.designed_mwh:
@@ -362,6 +406,51 @@ class BatteryMonitor:
             discharging = not ac
             charging = ac and pct_fb is not None and pct_fb < 100
 
+        # ---- 固件撒谎纠偏（2026-10-21）：容量趋势是方向唯一硬证据 ----
+        # 实测新签名：插电打游戏供不上时，PowerState=0x05（CHARGING 置位）、
+        # Rate 正号上报「充电 13.3W」，但剩余容量 9 分钟掉 2.4Wh（51399→
+        # 48952 mWh）——10-18 修的「两标志皆假」没覆盖这种，整条 PD 链路
+        # 被蒙在鼓里：不标定上限、不定档、不压制，电池一路放空（本次游戏
+        # 会话实测，full 61189mWh、整机仅 32W 而电池仍以 ~13W 放电）。
+        # 反向签名同样存在：刚插电 DISCHARGING 标志没翻过来 + 容量持续
+        # 上升，也不能当放电去下修供电上限。两个方向都靠趋势窗口确认。
+        self._trend_override = ""
+        claim = bool(charging and not discharging)
+        if claim != self._claim:
+            # 声称状态变沿（刚插电/刚拔电）：历史作废，重新攒窗口，
+            # 免得把插电前的掉电样本算进「插电后还在掉」的证据里
+            self._cap_hist = []
+            self._claim = claim
+        if ok and self.capacity_mwh:
+            self._cap_hist.append((now, self.capacity_mwh))
+            if len(self._cap_hist) > self.CAP_TREND_KEEP:
+                del self._cap_hist[:len(self._cap_hist) - self.CAP_TREND_KEEP]
+        if ac and ok:
+            if claim:
+                w = self._cap_trend_w()
+                if w is not None and w >= self.CAP_TREND_MIN_W:
+                    # 声称充电、实际在掉电 ⇒ 补电放电。输出形状复刻 10-18
+                    # 的 topup（两标志假 + rate 翻正），面板/养护/PD 全链路
+                    # 零改动生效；功率取「固件 Rate 绝对值」与「趋势折算」
+                    # 的较大者（Rate 可能连大小都谎，趋势慢但不会假）。
+                    charging = False
+                    self._trend_override = "lie_charge"
+                    if self.rate_w is None:
+                        self.rate_w = round(w, 3)
+                    else:
+                        self.rate_w = abs(self.rate_w)
+                        if w > self.rate_w:
+                            self.rate_w = round(w, 3)
+            elif discharging:
+                w = self._cap_trend_w(rising=True)
+                if w is not None and w >= self.CAP_TREND_MIN_W:
+                    # 声称放电、实际在充电 ⇒ 标志没翻过来，按充电记账
+                    discharging = False
+                    charging = True
+                    self._trend_override = "lie_discharge"
+                    if self.rate_w is not None:
+                        self.rate_w = -abs(self.rate_w)
+
         # 放电功率做 EWMA；充电/搁置清零，避免插上电后剩余时间还挂旧值。
         # 判据用 rate_w>0 而不是 discharging 标志 —— 插电补电态标志是假的
         # （见 _read_status），那种态下 EWMA 以前被清零，_pd_tick 只能拿到
@@ -378,9 +467,11 @@ class BatteryMonitor:
         if eta is None and life_s:
             eta = int(round(life_s / 60.0))
 
-        # 插电补电（top-up）：插着电，电池却在替电源出力。ACPI 两标志皆假，
-        # 只有 rate 符号能看出来（_read_status 里已翻成正）。面板红字角标、
-        # 养护统计、PD 控制器都认这个信号。
+        # 插电补电（top-up）：插着电，电池却在替电源出力。两种固件签名：
+        # ① ACPI 两标志皆假、rate 符号能看出来（10-18，_read_status 翻正）；
+        # ② CHARGING 标志置位 + Rate 正号谎报充电，靠容量趋势改判（10-21，
+        #    上面的 lie_charge 分支把 charging 撤掉、rate 翻正）。
+        # 面板红字角标、养护统计、PD 控制器都认这个信号。
         topup = bool(ac and ok and not discharging and not charging
                      and self.rate_w is not None and self.rate_w > 0.15)
 
@@ -402,6 +493,7 @@ class BatteryMonitor:
             "critical": bool(self.state & CRITICAL) if ok else False,
             "eta_minutes": eta,
             "topup": topup,
+            "trend_override": self._trend_override,
             "state_cn": ("放电中" if discharging else
                          "充电中" if charging else
                          "插电补电中" if topup else
