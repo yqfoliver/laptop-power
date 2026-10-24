@@ -157,7 +157,7 @@ def test_pd_sees_topup():
                    "pd_hold_s": 12.0, "pd_release_s": 45.0, "pd_cpu_step": 10,
                    "pd_cpu_min": 60, "pd_dim_level": 50, "pd_low_hz": True,
                    "pd_low_hz_value": 60})
-    # 大电流走快通道（3s）：两拍就够爬到 S4
+    # 大电流走快通道（3s）：两拍就够爬到 S3（S4 独显断电已废除）
     reqs = []
     for _ in range(4):
         r = pd.feed(True, 14.0, 5.0, machine_w=81.0)

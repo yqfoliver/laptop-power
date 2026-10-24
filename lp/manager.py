@@ -96,10 +96,10 @@ class Manager:
         self._pd_at = 0.0
         self._pd_hz = 0                # 本模块降到的刷新率（0=未降）
         self._pd_dim = False            # 本模块是否压着亮度
-        # S4（2026-10-18）：PD 保护自己的「独显断电」请求。与档位级的
-        # force_igpu（weak 档）走同一条 GPU Eco 通道，但来源不同：
-        # 档位看「充电器能力」，这里看「前面三层用尽了还在放电」。
-        self._pd_gpu_off = False
+        # 独显断电只有**事前**一条路：档位 force_igpu（weak 档，见
+        # _gpu_eco_tick）。2026-10-24 废除了 PD 阶梯里的 S4 事中断电 ——
+        # 用户反馈「独显可用后又断了会影响程序运行」（掐的是正在运行程序
+        # 的渲染上下文），运行中功率不足只降刷/压亮度/让 CPU。
         # Windows 节能模式让位（2026-10-17）：离电时若系统已把电源模式滑块
         # 压到「最佳能效」（Energy Saver 自动/手动触发），CPU 限频归 Windows
         # 统一管，工具不再叠加自己的 PROCTHROTTLEMAX —— 两层压制既无增益，
@@ -1112,8 +1112,7 @@ class Manager:
             except Exception:
                 pass
             if not (self.pd.enabled and ac):
-                if self.pd.active or self._pd_hz or self._pd_dim \
-                        or self._pd_gpu_off:
+                if self.pd.active or self._pd_hz or self._pd_dim:
                     self._pd_apply({"reset": True})
                     try:
                         self.pd.feed(False, None, 0.0)
@@ -1222,7 +1221,12 @@ class Manager:
             pass
 
     def _pd_apply(self, req: dict) -> None:
-        """执行 PD 保护动作（刷新率 / 亮度 / CPU 上限 / 独显断电）。全部可逆，失败静默。"""
+        """执行 PD 保护动作（刷新率 / 亮度 / CPU 上限）。全部可逆，失败静默。
+
+        2026-10-24：独显断电已从本链路移除 —— 事中因功率不足掐独展会破坏
+        正在运行的程序。换核显渲染只走事前路径（weak 档 → gpupick 注册表
+        偏好 + 独显闲时 GPU Eco 断电，见 _gpu_eco_tick）。
+        """
         try:
             if req.get("reset"):
                 if self._pd_hz:
@@ -1234,7 +1238,6 @@ class Manager:
                 if self._pd_dim:
                     self._pd_dim = False
                     self._pd_brightness_restore()
-                self._pd_gpu_off = False
                 self._pd_write_proc_max()
                 return
             if req.get("refresh"):
@@ -1265,29 +1268,6 @@ class Manager:
                     self._pd_brightness_restore()
             if req.get("cpu_cap") is not None:
                 self._pd_write_proc_max()
-            if req.get("gpu_off"):
-                # S4：前面的手段用尽了还在放电 → 断独显换核显渲染。
-                # 能不能落地当场判：没核显（断了没输出）/ 系统平衡档（gpueco
-                # 一律不干预）/ 通道被禁/配置关掉，都要如实告诉状态机，
-                # 绝不能让它以为独显已经断了。
-                reason = ""
-                if not bool(self.cfg.get("pd_s4_gpu_off", True)):
-                    reason = "已在配置里关闭"
-                elif getattr(self, "current", None) == "balanced":
-                    reason = "系统平衡档不干预"
-                elif not self._igpu_available():
-                    reason = "无核显"
-                elif not self.gpu_eco.enabled:
-                    reason = "Eco 通道已关闭"
-                if reason:
-                    try:
-                        self.pd.gpu_off_failed(reason)
-                    except Exception:
-                        pass
-                else:
-                    self._pd_gpu_off = True
-            if req.get("gpu_on"):
-                self._pd_gpu_off = False
         except Exception:
             pass
 
@@ -1312,8 +1292,6 @@ class Manager:
         r = self.pd.report()
         r["hz_applied"] = self._pd_hz
         r["dim_applied"] = self._pd_dim
-        # S4 独显断电：pdbudget 是「决策」，这里是「是否已交给 GPU Eco 执行」
-        r["gpu_off_applied"] = bool(self._pd_gpu_off)
         try:
             if self.pdsrc is not None:
                 s = self.pdsrc.summary()
@@ -1556,6 +1534,28 @@ class Manager:
             pass
 
     # -------------------------------------------------------- 独显 Eco 断电
+    def _dgpu_busy(self) -> bool:
+        """独显是否正在/刚刚在出力（有程序靠它渲染）。
+
+        2026-10-24 用户反馈定界：断独显只能是**事前**决策。weak 档强制核显
+        前先确认独显是闲的 —— 忙的时候一刀掐掉，正在跑的程序（游戏的
+        D3D/Vulkan 上下文）直接受损。判据（满足其一即忙）：
+          · NVML 实时利用率 ≥3%，或功耗 ≥10W（渲染中/刚渲染完）
+          · 当前就在游戏档（alt-tab 小窗后利用率掉零也算忙，宁可晚断）
+        读不到（NVML 未就绪）按不忙处理 —— 读不到通常意味着独显没在渲染。
+        """
+        try:
+            p = self._power_snap(max_age=20.0) or {}
+            u = p.get("gpu_util")
+            w = p.get("gpu_w")
+            if u is not None and float(u) >= 3.0:
+                return True
+            if w is not None and float(w) >= 10.0:
+                return True
+        except Exception:
+            pass
+        return getattr(self, "current", None) == "gaming"
+
     def _gpu_eco_tick(self, st: dict) -> None:
         """离电时把独显 ACPI 断电（借鉴 GHelper GPU Eco），插电还原。
 
@@ -1563,22 +1563,25 @@ class Manager:
         · 系统自带「平衡」档 → 一切自动化不干预
         · 离电 + 游戏档 → 不断电（离电也允许跑游戏）
         开关由 config gpu_eco_auto 控制（默认开），关闭时自动还原。
+
+        插电时的 force_off 只有一个来源：档位 force_igpu（weak 档，充电器
+        能力不够，程序**启动前**就定核显）。2026-10-24 起它还多一道闸：
+        独显正在出力时不碰（_dgpu_busy）—— 已经断着的保持断，在用着的
+        保持用，等它闲下来再断。PD 阶梯不再有独显断电（S4 已废除）。
         """
         ge = self.gpu_eco
         ge.enabled = bool(self.cfg.get("gpu_eco_auto", True))
-        # 弱电源（如 65W Type-C）：插电也把独显断掉，改用核显渲染。
-        # 详见 gpueco.tick 的 force_off 说明。
-        # 三个来源取或：① 档位 force_igpu（weak 档，充电器能力不够）；
-        # ② PD 阶梯 S4（前三层用尽了还在放电，见 _pd_apply 的 gpu_off）；
-        # 二者都要求「插电 + 有核显」。
-        force_off = False
+        tier_off = False
         try:
             # 无核显机型不断电：断掉独显就没有输出设备了（黑屏）
-            force_off = (bool(self.pd_tier_policy().get("force_igpu"))
-                         or self._pd_gpu_off) \
-                and bool(st.get("ac")) and self._igpu_available()
+            tier_off = (bool(self.pd_tier_policy().get("force_igpu"))
+                        and bool(st.get("ac")) and self._igpu_available())
         except Exception as _e:
             self._err("gpueco.force_off", _e)
+        force_off = tier_off
+        if tier_off and self._dgpu_busy():
+            # 忙：已断的保持断（下次启动的注册表偏好早已写好），在用的保持用
+            force_off = (ge.read() == 1)
         try:
             ge.tick(bool(st.get("ac")), getattr(self, "current", None),
                     force_off=force_off)
@@ -1623,11 +1626,11 @@ class Manager:
         mode, _src, _note, _tier = gp.classify(name)
         # 弱电源档（插电但供电不足）：不管内置名单怎么判，一律走核显。
         # 65W 下让独显跑 3D 必然持续从电池取电，比画质下降严重得多。
-        # PD 阶梯 S4 断独显时同理（正在运行的游戏也该用核显重开一局）。
+        # 注意这只是写「图形首选项」注册表 —— 对**下次启动**生效，运行中
+        # 的程序不受影响（事中不碰独显，2026-10-24）。
         try:
             if (bool(self.pd_tier_policy().get("force_igpu"))
-                    or self._pd_gpu_off) \
-                    and bool(st.get("ac")) and self._igpu_available():
+                    and bool(st.get("ac")) and self._igpu_available()):
                 mode = "igpu"
         except Exception as _e:
             self._err("gpupick.tier", _e)

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """弱电源（PD 100W）零补电预算控制器回归测试。
 
-覆盖：判据（只认「插电却在放电」）、逐级加深、到底 stuck、
-逐级回退、离电/关闭/数据缺失的还原、面板文案。
+覆盖：判据（只认「插电却在放电」）、逐级加深（S1 降刷 → S2 亮度 →
+S3 CPU 让瓦；2026-10-24 起最高只到 S3 —— 独显断电是事前决策，
+不是事中手段）、到底 stuck、逐级回退、离电/关闭/数据缺失的还原、
+面板文案。
 """
 
 import os
@@ -89,12 +91,16 @@ def test_escalation():
     ok(reqs and reqs[0].get("cpu_cap") == 90, "S3 CPU 上限 90%")
     ok(pd.stage == 3 and pd.cpu_cap == 90, "stage=3 cap=90")
 
-    # S4（2026-10-18）：三级用尽还在放电 → 独显断电。前三层都在「重新分配/
-    # 小步省」，只有换核显渲染能把整机压到充电器能力以内。
-    reqs = run(pd, True, 3.0, 30)
-    ok(reqs and reqs[0].get("gpu_off"), "S4 独显断电: %s" % reqs)
-    ok(pd.stage == 4 and pd.gpu_cut, "stage=4 且 gpu_cut=True")
-    ok("独显断电" in (pd.note or ""), "S4 文案: %s" % pd.note)
+    # 2026-10-24：S4「独显断电」废除 —— 事中因功率不足掐独显会破坏正在运行
+    # 的程序（用户反馈：独显可用后又断了会影响程序运行）。用不用独显是事前
+    # 决策（weak 档 gpupick + 独显闲时 GPU Eco），PD 阶梯最高只到 S3，
+    # 之后继续压 CPU 到体验地板，绝不发 gpu_off。
+    reqs = run(pd, True, 3.0, 60)
+    ok(all(not x.get("gpu_off") for x in reqs),
+       "任何深度都不请求独显断电: %s" % reqs)
+    ok(pd.stage == 3, "封顶 S3（CPU 让瓦）: stage=%d" % pd.stage)
+    ok(pd.cpu_cap < 90, "S3 之后继续压 CPU 而不是断独显: cap=%d" % pd.cpu_cap)
+    ok(MAX_STAGE == 3, "MAX_STAGE=3（S4 已废除）")
 
 
 def test_fast_path():
@@ -108,14 +114,14 @@ def test_fast_path():
 
 
 def test_deepen_to_floor():
-    print("== 最深层（S4 独显断电）继续压 CPU 到下限 ==")
+    print("== 最深层（S3 CPU 让瓦）继续压 CPU 到下限 ==")
     pd = PdBudget(cfg())
     caps = []
     for x in run(pd, True, 20.0, 100):       # 大电流走快通道，一次跑到底
         if x.get("cpu_cap"):
             caps.append(x["cpu_cap"])
     ok(pd.stage == MAX_STAGE, "已到最深层")
-    ok(MAX_STAGE == 4 and pd.gpu_cut, "S4 独显断电已落地")
+    ok(MAX_STAGE == 3, "最深层就是 S3（S4 独显断电已废除）")
     for _ in range(6):
         for x in run(pd, True, 20.0, 25):
             if x.get("cpu_cap"):
@@ -126,65 +132,48 @@ def test_deepen_to_floor():
         run(pd, True, 20.0, 25)
     ok(pd.cpu_cap == 40, "CPU 下限 40%%: %d" % pd.cpu_cap)
     ok(pd.stuck, "手段用尽标记 stuck")
-    ok("独显已断" in pd.note, "S4 到底的提示文案: %s" % pd.note)
+    ok("已达自动压制下限" in pd.note, "到底的提示文案: %s" % pd.note)
+    ok("试试核显" in pd.note, "提示里指事前路径（下次走核显）: %s" % pd.note)
     # stuck 后不再加码（避免毁体验）
     ok(run(pd, True, 20.0, 100) == [], "到底后不再产生新动作")
 
 
-def test_s4_refused():
-    print("== S4 落地条件不满足：如实回退，绝不假装已断电 ==")
+def test_s4_abolished():
+    print("== S4 已废除：任何负载/深度都不产生独显断电请求 ==")
     pd = PdBudget(cfg())
-    reqs = run(pd, True, 20.0, 25)          # 快通道(3s)：四级各一拍
-    ok(pd.stage == 4 and pd.gpu_cut, "已到 S4")
-    ok(any(x.get("gpu_off") for x in reqs), "发出过 gpu_off 请求")
-    pd.gpu_off_failed("无核显")
-    ok(pd.stage == 3 and not pd.gpu_cut, "回退 S3，gpu_cut 清除")
-    ok(pd.stuck and "无核显" in pd.note, "stuck 且注明原因: %s" % pd.note)
-    # 被拒后不再每轮 hold 都升级重试，直接把 CPU 压到底
-    reqs2 = [x for x in run(pd, True, 20.0, 100) if x.get("gpu_off")]
-    ok(reqs2 == [], "被拒后不再发 gpu_off: %s" % reqs2)
+    reqs = run(pd, True, 20.0, 25)          # 快通道(3s)：逐级到最深
+    ok(pd.stage == MAX_STAGE == 3, "最深 S3: stage=%d" % pd.stage)
+    ok(all(not x.get("gpu_off") for x in reqs),
+       "全程没有 gpu_off 请求: %s" % [x for x in reqs if x.get("gpu_off")])
+    ok(all(not x.get("gpu_on") for x in reqs),
+       "全程没有 gpu_on 请求（没有独显层要还原）")
+    ok(not hasattr(pd, "gpu_cut") or not pd.gpu_cut, "gpu_cut 不存在/为假")
+    ok(not hasattr(pd, "gpu_off_failed"), "gpu_off_failed 已删除")
+    # 再大的放电也一样：只压 CPU，不碰独显
+    reqs2 = run(pd, True, 60.0, 100)
+    ok(all(not x.get("gpu_off") for x in reqs2),
+       "60W 大放电也不请求独显断电: %s" % reqs2)
     ok(pd.cpu_cap == 40 and pd.stuck, "CPU 压到下限并 stuck: cap=%d" % pd.cpu_cap)
 
 
-def test_s4_hold_while_loaded():
-    print("== S4 断显后负载仍贴着上限：保持断电，不来回通断 ==")
-    pd = PdBudget(cfg(pd_supply_w=85.0, pd_release_s=45.0))
-    for _ in range(5):
-        pd.feed(True, 20.0, 5.0, machine_w=100.0)   # 快通道逐级到 S4
-    ok(pd.stage == 4 and pd.gpu_cut, "S4 已落地: stage=%d" % pd.stage)
-    # 独显断了 → 整机掉到 60W、电池不再放电，但 60 > min(85-25, 85×0.62)=52.7
-    got = None
-    for _ in range(30):                              # 150s 远超 release 45s
-        r = pd.feed(True, -1.0, 5.0, machine_w=60.0)
-        if r:
-            got = r
-    ok(got is None, "负载仍贴着上限：保持独显断电不还原: %s" % got)
-    ok(pd.gpu_cut, "gpu_cut 仍在")
-    # 负载真正退下去（<52.7W）才放行
-    first = None
-    for _ in range(20):
-        r = pd.feed(True, -1.0, 5.0, machine_w=30.0)
-        if r and first is None:
-            first = r
-    ok(first and first.get("gpu_on"), "退出重负载后还原独显: %s" % first)
-    ok(not pd.gpu_cut and pd.stage == 3, "stage 回 3（先还独显）")
-
-
 def test_release():
-    print("== 供电恢复 → 逐级回退（与加深顺序严格相反：独显→CPU→亮度→刷新率）==")
+    print("== 供电恢复 → 逐级回退（与加深顺序严格相反：CPU→亮度→刷新率）==")
     pd = PdBudget(cfg())
-    run(pd, True, 20.0, 250)                 # 压到底（含 stuck 判定那一次）
-    ok(pd.gpu_cut and pd.stuck, "先压到底（S4 独显断电 + stuck）")
-    # 供电恢复（rate 变负 = 充电）
+    run(pd, True, 20.0, 250)                 # 压到底（CPU 地板 + stuck）
+    ok(pd.cpu_cap == 40 and pd.stage == 3 and pd.stuck,
+       "先压到底（S3 CPU 地板 + stuck）: cap=%d stage=%d" % (pd.cpu_cap, pd.stage))
+    # 供电恢复（rate 变负 = 充电）。2026-10-24：S4 废除后回退第一步
+    # 不再是「独显恢复供电」，而是 CPU 上限从地板往上放。
     r = run(pd, True, -5.0, 90)
-    ok(r and r[0].get("gpu_on"), "回退第一步：独显恢复供电")
-    ok(pd.stage == 3 and not pd.gpu_cut, "stage=3，独显已还")
-    r = run(pd, True, -5.0, 90)
-    ok(r and r[0].get("cpu_cap") == 50, "回退：CPU 50%")
-    ok(pd.cpu_cap == 50, "cap=50")
+    ok(r and r[0].get("cpu_cap") == 50, "回退第一步：CPU 放到 50%")
+    ok(not any(x.get("gpu_on") for x in r), "回退不碰独显（没有独显层）")
+    ok(pd.stage == 3, "CPU 未撤完 stage 仍是 3")
     r = run(pd, True, -5.0, 90)
     ok(r and r[0].get("cpu_cap") == 60, "CPU 60%")
-    for expect in (70, 80, 90, 100):
+    ok(pd.cpu_cap == 60, "cap=60")
+    r = run(pd, True, -5.0, 90)
+    ok(r and r[0].get("cpu_cap") == 70, "CPU 70%")
+    for expect in (80, 90, 100):
         r = run(pd, True, -5.0, 90)
         if expect < 100:
             ok(r and r[0].get("cpu_cap") == expect, "CPU %d%%" % expect)
@@ -235,16 +224,20 @@ def test_report():
     pd = PdBudget(cfg())
     rp = pd.report()
     ok(rp["enabled"] and not rp["active"] and rp["stage"] == 0, "初始报告")
-    ok(rp["gpu_off"] is False and rp["gpu_cut"] is False, "初始未断独显")
     ok("待命" in pd.line(), "初始文案: %s" % pd.line())
     run(pd, True, 3.0, 30)
     rp = pd.report()
     ok(rp["active"] and rp["stage"] == 1, "压制中报告")
     ok("降刷" in pd.line(), "压制中文案: %s" % pd.line())
+    # 2026-10-24：S4 废除 —— 再大的放电也只到 S3（CPU 让瓦），报告里
+    # 不再有 gpu_off/gpu_cut 字段，也没有「独显断电」文案。
     run(pd, True, 20.0, 30)
     rp = pd.report()
-    ok(rp["stage"] == 4 and rp["gpu_off"] and rp["gpu_cut"], "S4 报告: %s" % rp)
-    ok("独显断电" in pd.line(), "S4 文案: %s" % pd.line())
+    ok(rp["stage"] == 3, "最深层 S3: stage=%d" % rp["stage"])
+    ok(rp["cpu_cap"] < 100, "S3 压 CPU: cap=%d" % rp["cpu_cap"])
+    ok("gpu_off" not in rp and "gpu_cut" not in rp,
+       "报告不再有独显断电字段: %s" % sorted(rp.keys()))
+    ok("CPU" in pd.line(), "S3 文案: %s" % pd.line())
     pd2 = PdBudget(cfg(pd_guard_enabled=False))
     ok("关" in pd2.line(), "关闭文案: %s" % pd2.line())
 
@@ -392,8 +385,7 @@ def main():
     test_no_trigger_on_mains()
     test_escalation()
     test_deepen_to_floor()
-    test_s4_refused()
-    test_s4_hold_while_loaded()
+    test_s4_abolished()
     test_release()
     test_reset_paths()
     test_report()

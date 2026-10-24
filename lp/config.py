@@ -159,10 +159,9 @@ DEFAULT_CONFIG = {
     # 60（原 40）：压 CPU 主要是「让瓦给独显」而非省总量，压到 40% 会明显
     # 拖长帧生成时间（卡顿比掉几帧更难受），60% 是实测的体验地板
     "pd_cpu_min": 60,
-    # S4（2026-10-18）：前三层都在「重新分配/小步省」，缺口真的大于 20W 时
-    # 只有断独显（换核显渲染）能把整机压到充电器能力以内 —— 用户明确要求
-    # 「电池不出力」。关闭后 S4 不落地，状态机退回 S3 并如实提示。
-    "pd_s4_gpu_off": True,
+    # 2026-10-24：原 pd_s4_gpu_off（PD 阶梯独显断电开关）已废除 —— 事中因
+    # 功率不足掐独显会破坏正在运行的程序。换核显是事前决策：weak 档
+    # gpupick 注册表偏好 + 独显闲时 GPU Eco 断电（见 _gpu_eco_tick）。
     # --- 预测式供电预算（2026-10-07 新增）：不等电池开始放电才动手 ----------
     # 原理：整机功耗 machine_w 与电池 rate 联立即可反推电源上限
     #   放电时：电源已满载 ⇒ 上限 = machine_w − rate（精确上界）
@@ -238,7 +237,9 @@ def _migrate(cfg: dict) -> None:
         cfg["gpu_tgp_max_watts"] = DEFAULT_CONFIG["gpu_tgp_max_watts"]
 
     # 清理从未被读取的废弃键（写错名字或调试时误建的残留），留着只会误导排查
-    for dead in ("manual",):
+    # 2026-10-24：pd_s4_gpu_off 随 S4 废除一起退场（config.json 里的残留
+    # 来自旧版本默认值，不是用户选择）
+    for dead in ("manual", "pd_s4_gpu_off"):
         if dead in cfg and dead not in DEFAULT_CONFIG:
             cfg.pop(dead, None)
 

@@ -19,13 +19,17 @@ S1 降刷到最低（本机 165→60Hz）：省 2~3W；
    更重要的是**天然限帧** —— GPU 不再满帧渲染，这才是能省出 10W+ 的大头。
 S2 屏幕亮度封顶：省 2~4W。
 S3 压 CPU 上限（PROCTHROTTLEMAX）：**不降总量** —— CPU 让出的瓦会被独显的
-   Dynamic Boost 吃掉。它的作用是把瓦让给独显保帧数，不是省电，所以排最后。
-S4 独显 ACPI 断电（GPU Eco）：**唯一天然降总量的手段**。前面三级都在
-   「重新分配」或「小步省」，缺口真的大于 20W 时只有换渲染路径（核显）
-   能把整机压到充电器能力以内 —— 65W PD 实到 ~58W，扣开销剩 ~46W，
-   独显最低 35W 必然超支。用户明确要求「电池不出力」，这就是最后一道。
-S5 手段用尽仍在放电：不再加码（继续压只会毁体验），明确提示用户降画质 /
-   分辨率 / 帧率上限，或换回 200W 电源。
+   Dynamic Boost 吃掉。它的作用是把瓦让给独显保帧数，不是省电，所以排最后，
+   压到体验地板（pd_cpu_min）为止。
+
+用不用独显是**事前**决策，不是事中手段（2026-10-24 用户反馈定界）
+------------------------------------------------------
+断独显 = 掐掉正在运行程序的渲染上下文（游戏的 D3D/Vulkan 设备直接丢失），
+所以 PD 阶梯**不包含**独显断电。正确路径是档位策略：供电被放电标定为
+weak 档时，程序**启动前**就定核显（gpupick 写「图形首选项」+ 独显闲时
+ACPI 断电），下一个游戏自然走核显；正在跑的程序一个字节都不碰。
+手段用尽仍在放电 ⇒ 明确提示用户降画质/分辨率/帧率上限、手动「试试核显」，
+或换回 200W 电源 —— 不再加码，继续压只会毁体验。
 
 全部动作可逆、只写自建计划，不碰系统「平衡」计划。
 
@@ -51,10 +55,12 @@ STAGE_CN = {
     1: "降刷限帧",
     2: "+ 亮度封顶",
     3: "+ CPU 让瓦",
-    4: "+ 独显断电",
 }
 
-MAX_STAGE = 4
+MAX_STAGE = 3
+# 2026-10-24：原 S4「独显断电」废除 —— 事中因功率不足掐独显会直接破坏正在
+# 运行的程序（用户反馈：独显可用后又断了会影响程序运行）。用不用独显是事前
+# 决策（weak 档 gpupick 注册表偏好 + 独显闲时 ACPI 断电），PD 阶梯最高只到 S3。
 
 # 电源上限估计的可信区间：太低说明读数异常，太高说明是坏值。
 # 2026-10-21 下调下限 25→10W：放电标定是**精确上界**（能量守恒，整机 − 补电
@@ -108,10 +114,8 @@ class PdBudget:
     def __init__(self, cfg: Optional[Dict[str, Any]] = None):
         self.cfg = cfg or {}
         self.enabled = True
-        self.stage = 0               # 当前压制深度 0~4
+        self.stage = 0               # 当前压制深度 0~3（S4 独显断电已废除）
         self.cpu_cap = 100           # CPU 上限天花板（独立于档位基准）
-        self.gpu_cut = False         # S4 独显断电是否已落地（面板/manager 读）
-        self._no_gpu_off = False     # S4 被拒过（无核显/通道禁）：不再反复尝试
         self.rate_w: Optional[float] = None
         self.machine_w: Optional[float] = None   # 整机功耗（SoC+独显+平台开销）
         self.supply_w: Optional[float] = None    # 学到的电源可持续上限
@@ -301,8 +305,6 @@ class PdBudget:
     def reload_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         if cfg is not None:
             self.cfg = cfg
-        # 配置可能刚把 S4 打开/关掉：重新给一次落地机会（仍不满足会再拒绝）
-        self._no_gpu_off = False
         self.enabled = bool(self.cfg.get("pd_guard_enabled", True))
         # 上次运行学到的电源上限（config 里持久化），冷启动即可预判。
         # 现在正常路径下这里是 None（改由 pd_supply.json 按供电会话存档），
@@ -379,9 +381,11 @@ class PdBudget:
             brightness   int   —— 亮度封顶值
             brightness_off True—— 还原档位亮度
             cpu_cap      int   —— CPU 上限（manager 再与档位基准取 min）
-            gpu_off      True  —— S4：独显 ACPI 断电（manager 经 GPU Eco 落地）
-            gpu_on       True  —— 还原独显供电
             reset        True  —— 全部还原（离电 / 关闭 / 数据缺失）
+
+        注意（2026-10-24）：没有 gpu_off/gpu_on —— 独显断电是**事前**决策
+        （weak 档 gpupick + GPU Eco），事中因功率不足掐独显会破坏正在运行的
+        程序，PD 阶梯不碰独显。
         """
         if not self.enabled:
             return self._reset() if self.active else None
@@ -433,20 +437,20 @@ class PdBudget:
             if self.over_s < hold:
                 return None
             self.over_s = 0.0
-            if self.stage < MAX_STAGE \
-                    and not (self.stage == 3 and self._no_gpu_off):
+            if self.stage < MAX_STAGE:
                 return self._escalate()
-            # 已在最深层（或 S4 被拒后退回 S3）：继续压 CPU 直到下限
+            # 已在最深层（S3）：继续压 CPU 直到体验地板
             if self.cpu_cap > cmin:
                 self.cpu_cap = max(cmin, self.cpu_cap - step)
                 self.note = "PD 供电不足：CPU 上限降到 %d%%（让瓦给独显）" % self.cpu_cap
                 return {"cpu_cap": self.cpu_cap, "stage": self.stage}
             self.stuck = True
-            self.note = ("独显已断、CPU 压到下限，仍在放电 %.1fW："
-                         "请降低游戏画质/分辨率或改用 200W 电源" % self.rate_w
-                         if self.stage >= 4 else
-                         "仍在放电 %.1fW：已达自动压制下限，"
-                         "请降低游戏画质/分辨率或改用 200W 电源" % self.rate_w)
+            # 2026-10-24：不再有「独显已断」分支 —— S4 废除后最深就是 CPU
+            # 地板。提示里指事前路径（下次启动走核显），事中不加码。
+            self.note = ("仍在放电 %.1fW：已达自动压制下限（不再加码，"
+                         "避免影响正在运行的程序）。可降低画质/分辨率/帧率上限，"
+                         "或在面板用「试试核显」让游戏下次走核显，"
+                         "或改用 200W 电源" % self.rate_w)
             return None
 
         # 达标（充电或零放电）
@@ -466,11 +470,6 @@ class PdBudget:
         # 所以「预判限的帧」只有在负载真正退下去（离上限还有 restore_margin）
         # 时才还原 —— 游戏过程全程保持 60Hz，退出游戏/回到轻负载才放。
         if self.predict_armed and self.stage == 1 and self._still_loaded():
-            self.ok_s = 0.0
-            return None
-        # S4 已断独显：同理，负载还贴着上限就不还独显 —— 还了立刻顶回上限、
-        # 重新放电再断一遍，每次通断独显供电都是游戏崩溃/黑屏的风险。
-        if self.gpu_cut and self.stage >= 4 and self._still_loaded():
             self.ok_s = 0.0
             return None
         self.ok_s = 0.0
@@ -523,48 +522,18 @@ class PdBudget:
                                self.cpu_cap - self._k("pd_cpu_step", 10))
             req["cpu_cap"] = self.cpu_cap
             self.note = "PD 供电不足：CPU 上限降到 %d%%（让瓦给独显保帧）" % self.cpu_cap
-        else:
-            # S4 独显断电：唯一能把总量压到供电能力以内的手段（前面几级
-            # 要么只省 2~4W，要么只做瓦数再分配）。能不能落地由 manager
-            # 判（有无核显 / Eco 通道是否可用），失败会回调 gpu_off_failed。
-            req["gpu_off"] = True
-            self.gpu_cut = True
-            self.note = ("PD 供电不足：独显断电，改用核显渲染"
-                         "（把整机压到充电器能力以内，电池不再补电）")
+        # 没有 stage 4：独显断电只能事前定（weak 档/gpupick），事中不掐
+        # —— 2026-10-24 用户反馈「独显可用后又断了会影响程序运行」。
         return req
 
-    def gpu_off_failed(self, reason: str = "") -> None:
-        """S4 没能落地（无核显 / Eco 通道不可用 / 配置关闭）→ 退回 S3 并如实标记。
-
-        绝不让状态机假装独显已经断了 —— 那样还原逻辑会按「已断电」放过
-        已经不成立的压制，面板也会显示一个没发生的动作（2026-10-18 的教训：
-        保护逻辑必须能被证明在工作）。
-        """
-        if self.stage < 4:
-            return
-        self.stage = 3
-        self.gpu_cut = False
-        self._no_gpu_off = True   # 落地条件不满足就别每个 hold 周期再试一次
-        self.stuck = True
-        self.note = ("独显断电不可用（%s）：已回退到 CPU 让瓦，"
-                     "请降低游戏画质/分辨率或改用 200W 电源"
-                     % (reason or "无核显或通道被禁"))
-
     def _deescalate(self) -> dict:
-        """逐级回退：先放独显、再放 CPU、再放亮度、最后放刷新率。
+        """逐级回退：先放 CPU、再放亮度、最后放刷新率。
 
-        顺序是 `_escalate` 的严格逆序：S3 压 CPU 在 S4 断独显**之前**发生，
-        还原就必须先还独显再还 CPU（否则会出现「CPU 已还原但独显还断着」
+        顺序是 `_escalate` 的严格逆序（S3 压 CPU 发生在 S2 亮度之前，
+        还原就必须先还 CPU 再还亮度，否则会出现「CPU 已还原但亮度还封着」
         的中间态被 reset 一次性吞掉、或 stage 跳级）。
         """
         step = self._k("pd_cpu_step", 10)
-        if self.stage >= 4:
-            # 独显断电是最后一道手段：先还独显（CPU 上限此时可能还压着，
-            # 下一步再逐级放回来）
-            self.stage = 3
-            self.gpu_cut = False
-            self.note = "供电恢复：独显恢复供电"
-            return {"gpu_on": True, "stage": self.stage}
         if self.cpu_cap < 100:
             self.cpu_cap = min(100, self.cpu_cap + step)
             # CPU 让瓦这一级已撤回，stage 必须跟着降一级，否则面板会继续显示
@@ -593,8 +562,6 @@ class PdBudget:
     def _clear(self) -> None:
         self.stage = 0
         self.cpu_cap = 100
-        self.gpu_cut = False
-        self._no_gpu_off = False    # 完全还原后，下次事件重新给 S4 机会
         self.over_s = 0.0
         self.ok_s = 0.0
         self.pre_s = 0.0
@@ -622,8 +589,6 @@ class PdBudget:
             "machine_budget_w": self.tier_policy().get("machine_budget_w"),
             "force_igpu": bool(self.tier_policy().get("force_igpu")),
             "allow_dgpu": bool(self.tier_policy().get("allow_dgpu")),
-            "gpu_off": bool(self.stage >= 4),
-            "gpu_cut": bool(self.gpu_cut),
             "tier_advice": self.tier_advice(),
             "predicted": self.predicted,
             "predict_armed": self.predict_armed,
