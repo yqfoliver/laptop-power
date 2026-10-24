@@ -90,7 +90,10 @@ STATUS = {
               "gpu_w": None, "system_w": 54.2, "gpu_temp": 49,
               "gpu_util": 0, "cpu_temp": 93, "envelope_w": 110,
               "gpu_tgp_max": 100, "reason": "", "events": []},
-    "pd": {"active": False, "tier": "unknown", "supply_w": None,
+    # 2026-10-24：supply_w=91/tier=unknown 才会真的走「充电器测定中」两行
+    # 长文案分支——旧夹具 supply_w=None，advText 落到养护短行，docstring 说
+    # 的「两行长文案最坏情况」从来没被真正量过（夹具漂移）。
+    "pd": {"active": False, "tier": "unknown", "supply_w": 91.0,
            "supply_src": None, "machine_w": 41.0,
            "force_igpu": False},
     "gpu_eco": {"eco": 0},

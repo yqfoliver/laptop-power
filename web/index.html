@@ -154,9 +154,6 @@
     <div class="row" style="margin:2px 0 0">
       <span class="hint" id="battDetail">—</span>
     </div>
-    <div class="row" style="margin:2px 0 0">
-      <span class="hint" id="battHw">—</span>
-    </div>
     <div class="row" style="margin:3px 0 0">
       <span class="hint" id="chgLine">—</span>
     </div>
@@ -326,29 +323,33 @@ function renderBatt(){
     : pctv>50 ? "var(--green)" : pctv>20 ? "#BA7517" : "var(--red)";
   document.getElementById("battPct").textContent = (pctv===null||pctv===undefined)?"—":pctv+"%";
 
-  let eta = "预计剩余 —";
+  // 2026-10-24 UI 降噪第三轮（电池卡）：原来 5 行文字 + 2 按钮，用户反馈
+  // 「信息过多不好看」。合并策略：
+  //   ①「充电中·」去掉——头部「已接电源（充电中）」已经说过，不重复；
+  //   ② 健康度/养护/容量/核显模式合并成一行（原 battDetail+battHw 两行）；
+  //   ③ 屏幕刷新率不再常驻——只在被工具限帧时（display_changed，PD 弱电源
+  //     保护 S1 / 显示模块改过）作为真信号出现，原生面板里才常驻显示。
+  let eta = "";
   if(!state.ac && B.eta_minutes) eta = "预计剩余 " + fmtDur(B.eta_minutes*60);
   else if(state.ac){
     // AC 三态拆分（2026-10-18）：插电 ≠ 已充满。插电补电时 ACPI 的 charging
     // 标志会翻假，旧逻辑直接显示「已充满，随时可拔」——5% 电量拔线就关机。
     // rate>0.5 现在可信：battery.py 已把补电态的负 Rate 翻成正。
     const _r = (B.rate_avg_w!=null?B.rate_avg_w:B.rate_w);
-    if(B.charging) eta = "充电中";
-    else if(B.discharging || (_r!=null && _r>0.5)) eta = "电池供电中 · 电源供不上";
-    else eta = "已充满或已到上限，随时可拔";
+    if(B.discharging || (_r!=null && _r>0.5)) eta = "电池供电中 · 电源供不上";
+    else if(!B.charging) eta = "已满或到上限，可拔线";
+    // charging：头部已显示「（充电中）」，这里不重复
   }
-  let s = eta;
-  if(B.health_pct!=null) s += " · 健康度 " + Math.round(B.health_pct) + "%";
+  const parts = [];
+  if(eta) parts.push(eta);
+  if(B.health_pct!=null) parts.push("健康度 " + Math.round(B.health_pct) + "%");
   const care = B.care||{};
-  if(care.enabled && care.score!=null) s += " · 养护 " + care.score + " 分";
-  document.getElementById("battDetail").textContent = s;
-
-  let hw = "";
+  if(care.enabled && care.score!=null) parts.push("养护 " + care.score + " 分");
   if(B.capacity_mwh && B.full_mwh)
-    hw = (B.capacity_mwh/1000).toFixed(1) + " / " + (B.full_mwh/1000).toFixed(1) + " Wh";
-  if(B.display_hz!=null) hw += (hw?" · ":"") + "屏幕 " + B.display_hz + " Hz";
-  if(!state.ac) hw += (hw?" · ":"") + "核显模式";
-  document.getElementById("battHw").textContent = hw;
+    parts.push((B.capacity_mwh/1000).toFixed(1) + "/" + (B.full_mwh/1000).toFixed(1) + " Wh");
+  if(!state.ac) parts.push("核显模式");
+  if(B.display_changed && B.display_hz!=null) parts.push("已限帧 " + B.display_hz + " Hz");
+  document.getElementById("battDetail").textContent = parts.join(" · ");
 
   renderCharge(care);
 
@@ -379,8 +380,10 @@ function renderBatt(){
       // 2026-10-17 用户看到「已测得下界 108W」误以为是测定结果/额定值。
       // 下界只能证明「充电器至少供得起这么多」，weak/mid/high/wall 定档
       // 与预判限帧都必须等放电事件把值标实（firm）之后才会发生。
+      // 2026-10-24 降噪：第二行砍掉「（如游戏）/真实」等赘字，两行各自
+      // 控制在单行不换行。
       advText = "充电器测定中 · 实测至少供得起 " + w0(pd.supply_w) +
-                " W（只是下界，不是额定功率）\n插电跑几分钟重负载（如游戏）即自动标定真实上限；未标定前策略中性、不干预";
+                " W（只是下界，不是额定功率）\n插电跑几分钟重负载即自动标定；未标定前策略中性、不干预";
     }else{
       let t = (TIER_SHORT[pd.tier] || "Type-C") + " · 上限 " +
               w0(pd.supply_w) + " W · 余量 " +
