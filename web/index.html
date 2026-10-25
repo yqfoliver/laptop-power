@@ -603,8 +603,18 @@ function renderGpuPick(){
     return;
   }
   if(!g.enabled){
+    // 2026-10-25 事故：调度未启用时按钮仍显示，点击在后端生效、界面却永远
+    // 停在「未启用」—— 用户看到的就是「点了没反应」。未启用就藏掉按钮，
+    // 已写进注册表的手动钉住如实展示。
     v.textContent = "已关闭"; v.style.color = "var(--muted)";
-    line.textContent = "核显优先调度未启用";
+    show(document.getElementById("gpIgpu"), false);
+    show(document.getElementById("gpDgpu"), false);
+    show(document.getElementById("gpAuto"), false);
+    show(document.getElementById("gpProbe"), false);
+    line.textContent = (cur.process && cur.src === "user")
+      ? ("调度未启用 · " + cur.process + " 已手动钉「" +
+         (cur.mode === "dgpu" ? "走独显" : "走核显") + "」")
+      : "核显优先调度未启用";
     return;
   }
   if(pr && pr.verdict){

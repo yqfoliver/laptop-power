@@ -148,6 +148,61 @@ cfg4 = {"gpu_eco_auto": None}
 hp4.apply(cfg4)
 ok(cfg4["gpu_eco_auto"] is False, "厂商通道不可用 -> 不每轮白试 GPU Eco")
 
+# ------------------------------------------------ 5b. 误判护栏（2026-10-25）
+# 事故：探测时独显正被 GPU Eco 断电（上轮实例被强杀没还原），WMI 只看到
+# 核显 -> 误判「纯核显机」-> alloc/eco/gpupick 被单向永久关闭，且 gpupick
+# 关闭后按钮点了没反应。护栏：eco=1 / 枚举全空不下结论；自动关闭记进
+# auto_filled（可逆）；独显回归只恢复自动关过的键。
+print("== 5b. eco=1 不下结论；自动关闭可逆；用户手设不动 ==")
+p_eco = H.probe(nvml=FakeNvml(ready=False, names=()), display=FakeDisplay(),
+                atkacpi_ok=False, gpu_names=["AMD Radeon(TM) 890M Graphics"])
+p_eco["atkacpi_ok"] = True
+p_eco["gpu_eco_state"] = 1        # 独显正被断电（测试直接注入，不碰真硬件）
+cfg5b = {"alloc_enabled": True, "gpu_eco_auto": True, "gpupick_enabled": True}
+H.HwProfile(path=tmp_json(), prof=p_eco).apply(cfg5b)
+ok(cfg5b["gpupick_enabled"] is True and cfg5b["alloc_enabled"] is True,
+   "eco=1：枚举看不到独显不下「纯核显机」结论", cfg5b)
+
+# 枚举全空（WMI/NVML 全失败）也不下结论
+p_blank = dict(p2, gpu_names=[], has_dgpu=False, gpu_eco_state=None)
+cfg5c = {"alloc_enabled": True, "gpu_eco_auto": True, "gpupick_enabled": True}
+H.HwProfile(path=tmp_json(), prof=p_blank).apply(cfg5c)
+ok(cfg5c["gpupick_enabled"] is True, "枚举全空：探测失败不下结论", cfg5c)
+
+# 真纯核显机：自动关闭且记进 auto_filled
+hp6 = H.HwProfile(path=tmp_json(), prof=p2)
+cfg6 = {"alloc_enabled": True, "gpu_eco_auto": True, "gpupick_enabled": True}
+hp6.apply(cfg6)
+ok(cfg6["gpupick_enabled"] is False, "真纯核显机：自动关闭")
+ok(hp6.data["auto_filled"].get("gpupick_enabled") is False,
+   "关闭动作记进 auto_filled（可逆的前提）")
+
+# 下次开机独显回归：自动关过的键恢复默认 True
+hp7 = H.HwProfile(path=tmp_json(), prof=p)
+hp7.data["auto_filled"] = {"alloc_enabled": False, "gpu_eco_auto": False,
+                           "gpupick_enabled": False}
+cfg7 = {"alloc_enabled": False, "gpu_eco_auto": False, "gpupick_enabled": False}
+hp7.apply(cfg7)
+ok(cfg7["alloc_enabled"] is True and cfg7["gpupick_enabled"] is True,
+   "独显回归：上次自动关掉的恢复默认", cfg7)
+ok(cfg7["gpu_eco_auto"] is True, "厂商通道可用时 eco 也恢复")
+
+# 厂商通道不可用：alloc/gpupick 恢复，eco 保持关（避免每轮白试）
+hp8 = H.HwProfile(path=tmp_json(), prof=dict(p, atkacpi_ok=False))
+hp8.data["auto_filled"] = {"alloc_enabled": False, "gpu_eco_auto": False,
+                           "gpupick_enabled": False}
+cfg8 = {"alloc_enabled": False, "gpu_eco_auto": False, "gpupick_enabled": False}
+hp8.apply(cfg8)
+ok(cfg8["alloc_enabled"] is True and cfg8["gpupick_enabled"] is True,
+   "无厂商通道：alloc/gpupick 仍恢复")
+ok(cfg8["gpu_eco_auto"] is False, "无厂商通道：eco 保持关闭")
+
+# 用户手设的 False（不在 auto_filled）：永不自动打开
+hp9 = H.HwProfile(path=tmp_json(), prof=p)
+cfg9 = {"alloc_enabled": True, "gpu_eco_auto": True, "gpupick_enabled": False}
+hp9.apply(cfg9)
+ok(cfg9["gpupick_enabled"] is False, "用户手设的关闭不被自动打开")
+
 # ---------------------------------------------------------------- 6. 峰值学习
 print("== 6. 独显峰值学习（只升不降 + 坏值过滤 + 抬升需连续两拍） ==")
 hp5 = H.HwProfile(path=tmp_json(), prof=p)

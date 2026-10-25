@@ -48,7 +48,7 @@ import sys
 import time
 from typing import Dict, List, Optional
 
-PROFILE_VERSION = 1
+PROFILE_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # 通用兜底：任何机器上都成立的保守值（探测失败时用）
@@ -222,6 +222,22 @@ def probe(nvml=None, display=None, atkacpi_ok=None,
             p["atkacpi_ok"] = bool(atkacpi_ok)
     except Exception:
         p["atkacpi_ok"] = False
+
+    # ---- GPU Eco 状态（只读，2026-10-25）：独显可能正被 GPU Eco 断电
+    #      （上一轮实例被强杀没来得及还原 / 离电省电），此时枚举看不到独显
+    #      是**预期**，不是「这台机器没有独显」的证据。曾因 eco=1 时探测
+    #      把 RTX 4060 机器误判成纯核显机，alloc/eco/gpupick 被单向关闭。
+    #      只在自探 ATKACPI 的路径上读（atkacpi_ok 显式传入 = 测试/离线
+    #      环境，别碰真硬件）；apply 据此区分「真没有」与「看不见」。
+    p["gpu_eco_state"] = None
+    if atkacpi_ok is None and p["atkacpi_ok"]:
+        try:
+            from .gpueco import GpuEco
+            p["gpu_eco_state"] = GpuEco().read()
+            if p["gpu_eco_state"] is not None:
+                p["sources"].append("独显eco状态=ATKACPI")
+        except Exception:
+            p["gpu_eco_state"] = None
 
     return p
 
@@ -432,14 +448,27 @@ class HwProfile:
             put("power_envelope_watts", FALLBACK["power_envelope_w"])
             put("dc_refresh_hz", self.dc_refresh_hz())
             put("pd_low_hz_value", self.dc_refresh_hz())
-            # 没有独显的机器：分配器 / GPU Eco / 核显优先都无从谈起
-            if not p.get("has_dgpu"):
+            # 没有独显的机器：分配器 / GPU Eco / 核显优先都无从谈起。
+            # 三道护栏（2026-10-25 事故：RTX 4060 机器被误判纯核显机）：
+            # ① GPU Eco=1（独显正被断电）时枚举看不到独显是预期，不下结论，
+            #    否则死锁：关掉 eco 就永远没人唤醒独显 → 永远探测不到；
+            # ② GPU 枚举一无所获（WMI/NVML 全空）是探测失败，不下结论；
+            # ③ 自动关闭必须记进 auto_filled —— 否则就是「失败即永久标记」，
+            #    独显回来也没人敢恢复。恢复只动自动关过的键，用户手设的
+            #    False 永远不动。
+            if p.get("has_dgpu"):
+                for k in ("alloc_enabled", "gpu_eco_auto", "gpupick_enabled"):
+                    if auto_prev.get(k) is False and (
+                            k != "gpu_eco_auto" or p.get("atkacpi_ok")):
+                        put(k, True)
+            elif p.get("gpu_names") and p.get("gpu_eco_state") != 1:
                 for k in ("alloc_enabled", "gpu_eco_auto", "gpupick_enabled"):
                     if cfg.get(k) is not False and k not in filled:
                         cfg[k] = False
+                        auto_now[k] = False
                         filled.append(k)
             # 厂商通道不可用：GPU Eco 每轮去开一次驱动只是白费力气
-            elif not p.get("atkacpi_ok"):
+            if p.get("has_dgpu") and not p.get("atkacpi_ok"):
                 if cfg.get("gpu_eco_auto") is None:
                     cfg["gpu_eco_auto"] = False
                     filled.append("gpu_eco_auto")

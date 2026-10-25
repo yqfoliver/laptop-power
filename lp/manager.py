@@ -1693,10 +1693,21 @@ class Manager:
         空名字，按钮形同失效。
         """
         try:
+            if not self.gpupick.enabled:
+                # 2026-10-25 事故：调度被关时按钮仍可见，点击在后端悄悄钉进
+                # 注册表、界面却停在「未启用」—— 用户看到的就是「点了没反应」。
+                # 明确拒绝并说明，别做半截事。
+                self.gpupick._last_note = "核显优先调度未启用（config gpupick_enabled）"
+                return self.gpupick_report()
             t = self._gp_target()
             name = exe_name or t["process"]
             if not name:
                 self.gpupick._last_note = "没有前台程序可钉"
+                return self.gpupick_report()
+            if not exe_name and name.lower() == "explorer.exe":
+                # _last_fg 兜底抓到桌面外壳：把 explorer 钉到独显 =
+                # 资源管理器常驻唤醒独显，纯费电，绝不可能是用户意图。
+                self.gpupick._last_note = "目标成了系统外壳，请先切到目标程序再点"
                 return self.gpupick_report()
             self.gpupick.set_user(name, mode if mode in ("igpu", "dgpu") else None)
             path = t["path"]
@@ -1710,8 +1721,8 @@ class Manager:
             else:
                 self.gpupick._last_note = ("已记住 %s（拿不到完整路径，"
                                            "注册表偏好下次启动再写）" % name)
-        except Exception:
-            pass
+        except Exception as _e:
+            self._err("gpupick.set", _e)
         return self.gpupick_report()
 
     # ------------------------------------------- 充电上限：「本次充满 / 回养护」
