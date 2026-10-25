@@ -127,6 +127,7 @@ DEFAULT_CONFIG = {
     "clamshell_enabled": False,
     "clamshell_on_battery": False,
     "gpu_eco_auto": True,             # 离电时独显 ACPI 断电（GHelper GPU Eco 通道，插电还原）       # 是否允许离电时也保持不休眠（默认只在插电时）
+    "ac_settle_s": 5.0,               # 电源事件防抖窗口（借鉴 GHelper charger_delay）：AC 插拔抖动时，新状态须连续稳定这么久才承认跳变，避免一次接触抖动触发整条昂贵巡检链（独显 ACPI 断电/上电要 3.6s 重枚举）
     # --- 核显优先调度（2026-10-10 新增）：核显跑得动的程序就不唤醒独显 ---
     # 走的是 Windows 自带的「图形首选项」通道（HKCU\...\UserGpuPreferences），
     # 普通权限可写、不需要驱动，且优先于厂商控制面板的程序设置。

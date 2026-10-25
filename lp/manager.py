@@ -162,6 +162,21 @@ class Manager:
         # 睡眠/唤醒重探：系统挂起前点亮独显、唤醒后强制重探硬件档案，
         # 避免带着 eco=1 进睡眠 → 唤醒后独显不可见被误判纯核显机（见 on_resume）
         self._needs_reprobe = False
+        # 电源事件防抖（借鉴 GHelper charger_delay）：AC 插拔接触抖动时，新状态
+        # 须连续稳定 ac_settle_s 秒才承认跳变，避免一次抖动触发整条昂贵巡检链
+        # （独显 ACPI 断电/上电要 3.6s 重枚举 + 显示模式切换可能黑一下）。
+        self._ac_stable = None
+        self._ac_candidate = None
+        self._ac_changed_at = 0.0
+        self._ac_unstable = False
+        self._ac_settle_s = float(cfg.get("ac_settle_s", 5.0))
+        # GPU 三态：把硬件有没有独显回填给 GpuEco，纯核显机不该出现断电/点亮逻辑
+        if self.hwprof is not None:
+            try:
+                self.gpu_eco.has_dgpu = bool(
+                    (getattr(self.hwprof, "profile", None) or {}).get("has_dgpu", True))
+            except Exception:
+                pass
         # 核显优先调度（2026-10-10 新增）：核显跑得动的程序不唤醒独显。
         # 本机核显档位首次运行自动探测一次并写回 config，之后以配置为准。
         from .gpupick import GpuPick, detect_igpu_tier
@@ -687,7 +702,13 @@ class Manager:
             "mode": cur,
             "mode_label": PROFILES[cur]["label"],
             "reason": self.last_reason,
-            "ac": st.get("ac"),
+            # 面板展示「已确认稳定」的 AC（与 eco/显示逻辑一致），避免抖动态下
+            # 文案与硬件行为打架；实例尚未巡检过时退回原始 OS 读数。
+            "ac": (self._ac_stable if getattr(self, "_ac_stable", None) is not None
+                   else st.get("ac")),
+            # 电源事件防抖：ac_unstable=True 表示正在等 settle 窗口（接触抖动中），
+            # 面板可据此展示「供电状态确认中…」
+            "ac_unstable": bool(getattr(self, "_ac_unstable", False)),
             "battery": st.get("battery_percent"),
             "charging": st.get("charging"),
             "foreground": fg.get("process", ""),
@@ -770,9 +791,32 @@ class Manager:
     # ------------------------------------------------------------ 循环
     def start(self) -> None:
         self._stop = False
+        # 启动自愈（借鉴 GHelper 启动纠正 GPU 模式）：上一会话被强杀可能留下
+        # eco=1（独显 ACPI 断电），但插电本应独显可用。balanced 档下 tick()
+        # 会提前 return、不纠正，这里显式点亮，避免带着「独显消失」进系统
+        # （那正是 2026-10-25 误判纯核显机的同一条死路）。功能被用户关闭时
+        # 不动（尊重其手动设置）；离电时也不动（本就应当断电）。
+        self._self_heal_eco()
         self._t = threading.Thread(target=self._loop, daemon=True)
         self._t.start()
         threading.Thread(target=self._top_proc_loop, daemon=True).start()
+
+    def _self_heal_eco(self) -> None:
+        """插电启动时若独显仍处断电态（遗留在断电/被强杀），点亮它。
+
+        只做「插电 + 功能开启 + 当前确为断电」这一条明确情形；弱电源档的
+        刻意断电会在下一轮 tick 重新判定，最多多一次无害的 blink。
+        """
+        if not self.gpu_eco.enabled:
+            return
+        try:
+            st = hw.power_status()
+            if not st.get("ac"):
+                return
+            if self.gpu_eco.read() == 1:
+                self.gpu_eco.ensure_on_nowait()
+        except Exception as _e:
+            self._err("eco.selfheal", _e)
 
     def stop(self) -> None:
         self._stop = True
@@ -1058,9 +1102,47 @@ class Manager:
             self._disp_fail_at = now + 60.0
         self.last_display = self.disp.sample()
 
+    def _stable_ac(self, raw_ac: bool, now: Optional[float] = None) -> bool:
+        """电源事件防抖（借鉴 GHelper charger_delay）。
+
+        返回「已确认稳定」的 AC 状态。raw_ac 与当前稳定值不同、但还没稳定够
+        ac_settle_s 秒时，返回旧值（不打断巡检链）；一旦候选值持续够久，才
+        承认跳变。单次采样的接触抖动（下一轮又变回原值）会被直接滤掉，因为
+        它撑不到 settle 窗口就已被「等于稳定值」分支清零。
+        """
+        if now is None:
+            now = time.time()
+        if self._ac_stable is None:
+            self._ac_stable = raw_ac
+            self._ac_unstable = False
+            return raw_ac
+        if raw_ac == self._ac_stable:
+            # 没有跳变进行中：清空候选与告警
+            self._ac_candidate = None
+            self._ac_changed_at = 0.0
+            self._ac_unstable = False
+            return raw_ac
+        # raw 与稳定值不同 —— 处于「待确认跳变」状态
+        if raw_ac != self._ac_candidate:
+            self._ac_candidate = raw_ac
+            self._ac_changed_at = now
+        if now - self._ac_changed_at >= self._ac_settle_s:
+            self._ac_stable = raw_ac
+            self._ac_candidate = None
+            self._ac_changed_at = 0.0
+            self._ac_unstable = False
+        else:
+            self._ac_unstable = True
+        return self._ac_stable
+
     def battery_tick(self, st: Optional[dict] = None) -> dict:
         """读一次电池 + 校准刷新率。每轮检测调一次，开销 ≈ 0.3 ms。"""
         st = st or hw.power_status()
+        # 电源事件防抖（charger_delay）：插拔接触抖动时先「按住」旧值，稳定够久
+        # 才承认跳变，避免一次抖动触发独显 ACPI 3.6s 重枚举 + 显示模式切换等
+        # 整条昂贵巡检链。拷贝一份再改，避免污染调用方传入的 dict。
+        st = dict(st)
+        st["ac"] = self._stable_ac(bool(st.get("ac")))
         # 唤醒后置的重探标志：硬件可能变了（独显重新可见），先重探再继续，
         # 否则后续巡检会沿用睡眠前被断电的独显状态。
         if getattr(self, "_needs_reprobe", False):

@@ -533,7 +533,13 @@ function renderAlloc(){
   set("pwSys","pwSysBar",null,A.system_w,env,null,"#8B5CF6");
   if(state.ac===false){
     const ge = (state.gpu_eco||{});
-    if(ge.eco===1) document.getElementById("pwGpu").textContent = "已断电";
+    const mode = ge.mode;
+    const pwGpuEl = document.getElementById("pwGpu");
+    // GPU 三态（借鉴 GHelper GPU 模式）：none=无独显 / eco=已断电 /
+    // standard=活动（保持数值）/ forced_standard=外接屏直连强制点亮
+    if(mode === "none") pwGpuEl.textContent = "无独显";
+    else if(mode === "eco") pwGpuEl.textContent = "已断电";
+    else if(mode === "forced_standard") pwGpuEl.textContent = "外接屏强制开";
   }
   const ev = (A.events && A.events.length) ? A.events[A.events.length-1] : "";
   const whyEl = document.getElementById("allocWhy");

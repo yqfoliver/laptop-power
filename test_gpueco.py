@@ -243,6 +243,45 @@ def test_ext_display_guard():
     ok(f3.eco == 1, "无外接屏 → 离电照常断电（无回归）")
 
 
+def test_gpu_mode():
+    print("== GPU 三态（mode 语义）==")
+    g = GpuEco()
+    # 纯核显机：任何 eco 值都报 none，不应触发断电/点亮逻辑
+    g.has_dgpu = False
+    g._ext_display = False
+    g.read = lambda: 1
+    ok(g.mode() == "none", "无独显 → none（即便 eco 读为 1）")
+    # 有独显：eco 1/0/None 分别映射到 eco/standard/standard
+    g.has_dgpu = True
+    g._ext_display = False
+    g.read = lambda: 1
+    ok(g.mode() == "eco", "eco=1 → eco（已断电）")
+    g.read = lambda: 0
+    ok(g.mode() == "standard", "eco=0 → standard（活动）")
+    g.read = lambda: None
+    ok(g.mode() == "standard", "eco=None → standard（不误报已断电）")
+    # 外接显示器直连：护栏把独显强制点亮，mode 单独标识
+    g._ext_display = True
+    g.read = lambda: 1
+    ok(g.mode() == "forced_standard", "外接屏直连 → forced_standard（优先保屏）")
+    # report 携带 mode / has_dgpu / ext_display
+    g._ext_display = False
+    g.has_dgpu = True
+    g.read = lambda: 0
+    r = g.report()
+    ok("mode" in r and r["mode"] == "standard", "report 含 mode")
+    ok(r.get("has_dgpu") is True, "report 含 has_dgpu")
+    ok("ext_display" in r, "report 含 ext_display")
+    # tick 会把本次的外接屏状态记进 _ext_display，供 report 区分
+    f = FakeAtk()
+    g2 = GpuEco(atk=f)
+    g2.enabled = True
+    g2.tick(False, "office", ext_display_connected=True)
+    ok(g2._ext_display is True, "tick 记录 ext_display_connected=True")
+    g2.tick(False, "office", ext_display_connected=False)
+    ok(g2._ext_display is False, "tick 记录 ext_display_connected=False")
+
+
 if __name__ == "__main__":
     test_basic()
     test_tick_auto()
@@ -255,4 +294,5 @@ if __name__ == "__main__":
     test_ext_display_guard()
     test_ensure_on_nowait()
     test_manager_power_events()
+    test_gpu_mode()
     print("\n全部通过：%d 项" % PASS)
