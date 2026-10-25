@@ -91,6 +91,7 @@ DEV: Dict[str, int] = {
     # —— 显卡 / 屏幕 ——
     "gpu_mux":          0x00090016,   # 1=标准(混合)
     "gpu_eco":          0x00090020,   # 1=独显关闭
+    "gpu_display_connect": 0x00090030,  # 1=有显示器直连独显（G-Helper GPUDisplayConnect）
     "screen_overdrive": 0x00050019,
     "overdrive_support": 0x00050020,
     "screen_opt_bright": 0x0005002A,
@@ -360,6 +361,17 @@ class AtkAcpi:
 
     def gpu_mux(self) -> Optional[int]:
         return self.read_val("gpu_mux")
+
+    def gpu_display_connected(self) -> Optional[bool]:
+        """是否有显示器直连独显（G-Helper GPUDisplayConnect，0x00090030）。
+
+        独显被 ACPI 断电前必须查这个：外接屏直连独显时断掉独显 = 黑屏。
+        返回 None=本机不支持该端点；True/False=有/无直连显示器。
+        """
+        v = self.read_val("gpu_display_connect")
+        if v is None:
+            return None
+        return bool(v & 0x1)
 
     # -------------------------------------------------- 状态汇总
     def snapshot(self) -> dict:

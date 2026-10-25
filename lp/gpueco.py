@@ -155,7 +155,7 @@ class GpuEco:
 
     # -------------------------------------------------- 自动化 tick
     def tick(self, on_ac: bool, active_profile: Optional[str],
-             force_off: bool = False) -> None:
+             force_off: bool = False, ext_display_connected: bool = False) -> None:
         """由 manager 巡检调用。幂等：目标没变就只读一次。
 
         force_off：供电不足（弱电源档）时，**插电也要把独显断掉**。
@@ -163,6 +163,12 @@ class GpuEco:
         （最低也要 35W 起，加上 CPU 必然超支）。这种情况下正确解法不是
         压功耗到勉强不放电，而是换渲染路径 —— 核显渲染整机功耗大幅下降，
         省下的预算还能给电池充电。
+
+        ext_display_connected：有显示器直连独显（0x00090030）。此时**绝不**
+        把独显断电 —— 外接屏直连独显时断掉独显 = 黑屏，比多耗几瓦严重得多。
+        这条护栏优先级高于一切省电意图（离电空闲 / 弱电源 force_igpu 都让位）；
+        若独显已被断（先插屏后想断）也会把它拉回来。读不到该端点（None）时
+        视为无外接屏，退回原行为，不引入回归。
         """
         if not self.enabled:
             if self._applied == 1:
@@ -170,6 +176,13 @@ class GpuEco:
             return
         if active_profile == "balanced":
             return                    # 系统平衡档：一切自动化都不干预
+        # 外接显示器直连独显：保屏优先于一切省电。
+        if ext_display_connected:
+            if self.read() == 1:
+                self.set(0)          # 断着的拉回来 / 在用的保持用
+            elif self._applied is None:
+                self._applied = 0
+            return
         if on_ac and not force_off:
             # 插电：独显必须可用。不管 eco 是谁关的（GHelper/上一次会话），
             # 只要当前是断电状态就还原；初始状态记一笔"已确认可用"。
@@ -192,6 +205,21 @@ class GpuEco:
         self.set(want)
 
     # -------------------------------------------------- 还原 / 状态
+    def ensure_on_nowait(self) -> None:
+        """非阻塞地把独显点亮（仅一次 DEVS 写，不等待回读）。
+
+        用于系统即将睡眠前尽力避免「带着 eco=1 进睡眠」——在 WndProc 里
+        不能做耗时的回读等待（本机会阻塞系统的挂起流程）。是否真生效留给
+        唤醒后的 tick / resume 重探兜底。功能被用户关闭时不碰（尊重其设置）。
+        """
+        if not self.enabled:
+            return
+        try:
+            if self.read() == 1:
+                self._write_raw(0)
+        except Exception:
+            pass
+
     def restore(self) -> bool:
         """程序退出时调用：只还原本模块断的电。
 

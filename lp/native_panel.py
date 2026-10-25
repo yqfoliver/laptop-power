@@ -27,6 +27,10 @@ WM_TIMER = 0x0113
 WM_ERASEBKGND = 0x0014
 WM_PAINT = 0x000F
 WM_CLOSE = 0x0010
+WM_POWERBROADCAST = 0x0218
+PBT_APMSUSPEND = 0x0004
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_APMRESUMESUSPEND = 0x0007
 
 SW_HIDE = 0
 SW_RESTORE = 9
@@ -403,6 +407,20 @@ class NativePanel:
             if msg == WM_CLOSE:
                 _u.ShowWindow(hwnd, SW_HIDE)     # 关闭=隐藏，不退守护
                 return 0
+            if msg == WM_POWERBROADCAST:
+                # 系统电源事件：挂起前点亮独显、唤醒后强制重探硬件档案，
+                # 避免带着 eco=1 进睡眠 → 唤醒后独显不可见被误判纯核显机。
+                try:
+                    mgr = self.mgr
+                    if mgr is not None:
+                        if wparam == PBT_APMSUSPEND:
+                            mgr.on_suspend()
+                        elif wparam in (PBT_APMRESUMEAUTOMATIC,
+                                        PBT_APMRESUMESUSPEND):
+                            mgr.on_resume()
+                except Exception:
+                    pass
+                return 0      # 0 = 允许挂起/已处理，绝不返回 DENY
         except Exception:
             pass
         return _u.DefWindowProcW(hwnd, msg, wparam, lparam)

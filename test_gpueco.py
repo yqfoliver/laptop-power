@@ -165,6 +165,84 @@ def test_report():
     ok(g.line(True) == "", "插电文案为空")
 
 
+def test_ensure_on_nowait():
+    print("== 睡眠前非阻塞点亮独显 ==")
+    # 当前已断电（eco=1）→ 非阻塞写 0
+    f = FakeAtk()
+    f.eco = 1
+    g = GpuEco(atk=f)
+    g.enabled = True
+    n = f.writes
+    g.ensure_on_nowait()
+    ok(f.eco == 0 and f.writes == n + 1, "eco=1 → 立即写 0（非阻塞）")
+    # 当前已点亮（eco=0）→ 不写
+    f2 = FakeAtk()
+    g2 = GpuEco(atk=f2)
+    g2.enabled = True
+    n2 = f2.writes
+    g2.ensure_on_nowait()
+    ok(f2.writes == n2, "eco=0 → 零写入")
+    # 功能关闭 → 不碰（尊重用户设置）
+    f3 = FakeAtk()
+    f3.eco = 1
+    g3 = GpuEco(atk=f3)
+    g3.enabled = False
+    g3.ensure_on_nowait()
+    ok(f3.eco == 1 and f3.writes == 0, "关闭功能 → 不写")
+
+
+def test_manager_power_events():
+    print("== manager 睡眠/唤醒事件 ==")
+    from lp.manager import Manager
+    class FakeMgr:
+        def __init__(self):
+            self.gpu_eco = GpuEco(atk=FakeAtk())
+            self.gpu_eco.enabled = True
+            self._errs = []
+        def _err(self, *a):
+            self._errs.append(a)
+    # 绑定真实 Manager 方法（这两个方法只依赖 self.gpu_eco / self._err）
+    FakeMgr.on_suspend = Manager.on_suspend
+    FakeMgr.on_resume = Manager.on_resume
+    # on_suspend：点亮独显（非阻塞）
+    m = FakeMgr()
+    m.gpu_eco._a().eco = 1
+    m.on_suspend()
+    ok(m.gpu_eco._a().eco == 0, "on_suspend → 独显点亮")
+    # on_resume：只置重探标志，不做耗时探测
+    m2 = FakeMgr()
+    m2.on_resume()
+    ok(getattr(m2, "_needs_reprobe", False) is True, "on_resume → 置 _needs_reprobe")
+    ok(len(m2._errs) == 0, "on_resume 不抛异常")
+
+
+def test_ext_display_guard():
+    print("== 外接显示器护栏（直连独显绝不切断）==")
+    # 1) 离电空闲本会断电，外接屏在 → 保持独显可用
+    f = FakeAtk()
+    g = GpuEco(atk=f)
+    g.enabled = True
+    g.tick(False, "office", ext_display_connected=True)
+    ok(f.eco == 0 and g._applied == 0, "离电 + 外接屏 → 不断电（保屏）")
+    # 2) 弱电源 force_off（插电也要断）被护栏压住
+    g.tick(True, "office", force_off=True, ext_display_connected=True)
+    ok(f.eco == 0, "弱电源 force_off + 外接屏 → 仍不断电")
+    # 3) 独显已被断（先插屏后想断的情形）→ 护栏把它拉回来
+    f2 = FakeAtk()
+    f2.eco = 1
+    g2 = GpuEco(atk=f2)
+    g2.enabled = True
+    g2._applied = 1
+    g2.tick(False, "office", ext_display_connected=True)
+    ok(f2.eco == 0, "外接屏接入时独显已被断 → 拉回可用")
+    # 4) 无外接屏（默认）行为不变：离电照常断电
+    f3 = FakeAtk()
+    g3 = GpuEco(atk=f3)
+    g3.enabled = True
+    g3.tick(False, "office")
+    ok(f3.eco == 1, "无外接屏 → 离电照常断电（无回归）")
+
+
 if __name__ == "__main__":
     test_basic()
     test_tick_auto()
@@ -174,4 +252,7 @@ if __name__ == "__main__":
     test_fail_write()
     test_restore()
     test_report()
+    test_ext_display_guard()
+    test_ensure_on_nowait()
+    test_manager_power_events()
     print("\n全部通过：%d 项" % PASS)

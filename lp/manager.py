@@ -159,6 +159,9 @@ class Manager:
         from .gpueco import GpuEco
         self.gpu_eco = GpuEco()
         self.gpu_eco.enabled = bool(cfg.get("gpu_eco_auto", True))
+        # 睡眠/唤醒重探：系统挂起前点亮独显、唤醒后强制重探硬件档案，
+        # 避免带着 eco=1 进睡眠 → 唤醒后独显不可见被误判纯核显机（见 on_resume）
+        self._needs_reprobe = False
         # 核显优先调度（2026-10-10 新增）：核显跑得动的程序不唤醒独显。
         # 本机核显档位首次运行自动探测一次并写回 config，之后以配置为准。
         from .gpupick import GpuPick, detect_igpu_tier
@@ -1058,6 +1061,11 @@ class Manager:
     def battery_tick(self, st: Optional[dict] = None) -> dict:
         """读一次电池 + 校准刷新率。每轮检测调一次，开销 ≈ 0.3 ms。"""
         st = st or hw.power_status()
+        # 唤醒后置的重探标志：硬件可能变了（独显重新可见），先重探再继续，
+        # 否则后续巡检会沿用睡眠前被断电的独显状态。
+        if getattr(self, "_needs_reprobe", False):
+            self._needs_reprobe = False
+            self._reprobe_hw()
         self._bat_n += 1
         # 插电时放电功率没意义（但健康度/充电状态要留），降到每 6 轮读一次
         if st.get("ac") and (self._bat_n % 6) and self.last_battery:
@@ -1582,11 +1590,58 @@ class Manager:
         if tier_off and self._dgpu_busy():
             # 忙：已断的保持断（下次启动的注册表偏好早已写好），在用的保持用
             force_off = (ge.read() == 1)
+        # 外接显示器直连独显：护栏优先级高于一切省电意图（见 gpueco.tick）。
+        ext_disp = False
+        try:
+            from . import atkacpi as _atk
+            _aa = _atk.get()
+            if _aa is not None:
+                _d = _aa.gpu_display_connected()
+                if _d:
+                    ext_disp = True
+        except Exception as _e:
+            self._err("gpueco.display", _e)
         try:
             ge.tick(bool(st.get("ac")), getattr(self, "current", None),
-                    force_off=force_off)
+                    force_off=force_off, ext_display_connected=ext_disp)
         except Exception:
             pass
+
+    # -------------------------------------------------- 睡眠 / 唤醒（WM_POWERBROADCAST）
+    def on_suspend(self) -> None:
+        """系统即将睡眠：尽力点亮独显，避免带着 eco=1 进睡眠。
+
+        唤醒后独显若仍断电、WMI/NVML 集体看不见它，硬件档案就会误判这台机器
+        没有独显（2026-10-25 强杀误判事故就是同一条死路）。点亮动作非阻塞，
+        是否真生效由唤醒后的 on_resume 重探兜底。
+        """
+        try:
+            self.gpu_eco.ensure_on_nowait()
+        except Exception as _e:
+            self._err("suspend.eco", _e)
+
+    def on_resume(self) -> None:
+        """系统唤醒：硬件状态可能变了（独显重新可见），唤醒后由主巡检线程
+        强制重探硬件档案并复位 GPU Eco 判定——见 battery_tick 里的
+        _needs_reprobe 处理。这里只置标志，不在此做耗时探测。
+        """
+        self._needs_reprobe = True
+
+    def _reprobe_hw(self) -> None:
+        """强制重探硬件档案（唤醒后调用）。读盘 + 枚举 NVML/WMI/ATKACPI，
+        全部只读；独显一旦重新可见，apply() 会把当初自动关掉的功能恢复回来。
+        """
+        try:
+            from . import hwprofile as _hp
+            self.hwprof = _hp.ensure(self.cfg, nvml=self.nvml, display=self.disp,
+                                     force=True)
+            if self.hwprof is not None:
+                self.alloc.set_hw_tgp(self.hwprof.gpu_tgp_max())
+            # 复位 GPU Eco 的「已应用」记忆，让下次巡检重新判定，
+            # 不沿用睡眠前的状态（那时可能是断电）
+            self.gpu_eco._applied = None
+        except Exception as _e:
+            self._err("resume.reprobe", _e)
 
     def pd_tier_policy(self) -> dict:
         """当前供电档位的策略（整机/GPU 预算、是否强制核显）。"""
