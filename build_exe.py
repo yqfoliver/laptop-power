@@ -27,6 +27,7 @@ cmd = [
     "--hidden-import", "lp.pdtier",
     "--hidden-import", "lp.errlog",      # 错误日志（函数内动态 import，漏了=日志永远为空）        # 硬件自适应（manager 里函数内 import）
     "--hidden-import", "lp.gpupick",          # 核显优先调度（同上）
+    "--hidden-import", "lp.logtrim",     # 日志概率自清理（main/native_panel 函数内动态 import）
     "--clean", "-y",
     "main.py",
 ]

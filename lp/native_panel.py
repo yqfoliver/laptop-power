@@ -558,11 +558,12 @@ class NativePanel:
             try:
                 self._draw_ui(mem, W, H)
             except Exception:
-                try:   # 绘制异常不静默：留日志防白屏排查无门
+                try:   # 绘制异常不静默：留日志防白屏排查无门（带概率自清理）
                     import traceback
-                    with open(os.path.join(ROOT_DIR, "panel_ui_err.log"), "a",
-                              encoding="utf-8") as f:
-                        f.write(time.strftime("%F %T ") + traceback.format_exc())
+                    from lp import logtrim
+                    logtrim.log_line(
+                        os.path.join(ROOT_DIR, "panel_ui_err.log"),
+                        time.strftime("%F %T ") + traceback.format_exc().rstrip("\n"))
                 except Exception:
                     pass
                 self._fill(mem, C_BG, 0, 0, W, H)

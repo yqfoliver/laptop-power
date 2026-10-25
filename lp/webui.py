@@ -12,6 +12,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
+from . import logtrim
+
 if getattr(sys, "frozen", False):
     ROOT = sys._MEIPASS              # 打包后 web/ 资源在解包目录里
     # exe 旁边若存在 web/index.html（用户目录里就是有），优先用磁盘版：
@@ -70,8 +72,9 @@ class Handler(BaseHTTPRequestHandler):
         # 只记页面加载，不记 /api/ 轮询（每 2 秒三个请求，会把这个日志写成 GB 级）
         if not path.startswith("/api/"):
             try:
-                with open(os.path.join(ROOT, "webui_access.log"), "a", encoding="utf-8") as _lf:
-                    _lf.write("%s GET %s UA=%s REF=%s\n" % (
+                logtrim.log_line(
+                    os.path.join(ROOT, "webui_access.log"),
+                    "%s GET %s UA=%s REF=%s" % (
                         time.strftime("%Y-%m-%d %H:%M:%S"), path,
                         (self.headers.get("User-Agent") or "")[:160],
                         (self.headers.get("Referer") or "")[:80]))

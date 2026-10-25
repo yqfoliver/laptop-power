@@ -388,12 +388,12 @@ def _wv2_child(argv) -> int:
 
 
 def _wv2_child_log(line: str) -> None:
-    """面板子进程自己的日志：不干扰主程序的 exit.log"""
+    """面板子进程自己的日志：不干扰主程序的 exit.log（带概率自清理）"""
     try:
-        from lp import config
-        with open(os.path.join(config.APP_ROOT, "wv2_child.log"), "a",
-                  encoding="utf-8") as f:
-            f.write("%s %s\n" % (time.strftime("%F %T"), line))
+        from lp import config, logtrim
+        logtrim.log_line(
+            os.path.join(config.APP_ROOT, "wv2_child.log"),
+            "%s %s" % (time.strftime("%F %T"), line))
     except Exception:
         pass
 
