@@ -91,10 +91,51 @@ def test_sustained_flap_keeps_old():
     ok(m2._ac_unstable is True, "候选待确认期间 unstable=True")
 
 
+def test_pd_waits_out_settle_window():
+    print("== 防抖窗口内 PD 控制器不动手（否则每次拔电都闪一下屏） ==")
+    m = mk()
+    m._stable_ac(True)                  # 基线：插电
+    m._stable_ac(False)                 # 刚拔：候选，尚未确认 → ac 仍是 True
+    ok(m._ac_stable is True and m._ac_unstable is True, "处于待确认窗口")
+
+    class FakePd:
+        enabled = True
+        active = False
+        predict_armed = False
+        cpu_cap = 100
+
+        def __init__(self):
+            self.calls = []
+
+        def feed(self, *a, **kw):
+            self.calls.append((a, kw))
+            return None
+
+    old_pd, old_src = m.pd, m.pdsrc
+    m.pd = FakePd()
+    m.pdsrc = None
+    try:
+        m._pd_tick({"ac": True}, {})
+        ok(m.pd.calls == [],
+           "窗口内不调 pd.feed（否则「拔电」会被当成「PD 供不上」→ 降刷）")
+        # 窗口结束、确认离电后：走还原路径，不进压制
+        applied = []
+        m._pd_apply = lambda req: applied.append(req)     # 别真去写电源计划
+        m.pd.active = True
+        m._stable_ac(False, now=time.monotonic() + 10)
+        m._pd_tick({"ac": False}, {})
+        ok([c[0][0] for c in m.pd.calls] == [False],
+           "确认离电后只做还原（feed(False)），不进压制: %r" % (m.pd.calls,))
+        ok(applied == [{"reset": True}], "并执行一次性还原: %r" % (applied,))
+    finally:
+        m.pd, m.pdsrc = old_pd, old_src
+
+
 if __name__ == "__main__":
     test_first_read_sets_stable()
     test_flicker_filtered()
     test_real_change_committed()
     test_settle_window()
     test_sustained_flap_keeps_old()
+    test_pd_waits_out_settle_window()
     print("\n全部通过：%d 项" % PASS)

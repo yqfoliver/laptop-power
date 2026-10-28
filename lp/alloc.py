@@ -248,6 +248,36 @@ class PowerAllocator:
         self._gpu_w_at_base = None
         self.verdict = "unknown"
 
+    # -------------------------------------------------- 外部写入的记账同步
+    def sync_cur(self, pct) -> None:
+        """外部（PD 保护 / 限频看门狗 / 切档）改了处理器上限时，同步内部记账。
+
+        本模块与 PD 保护共用同一个旋钮，但「当前档位」只有这里记着。不同步
+        就会出现：PD 把限制放开回 100% → 分配器仍以为自己在 60% → 后续每轮
+        都判「维持现状」，CPU 让瓦给 GPU 的整条控制律静默失效。
+        """
+        try:
+            v = int(pct)
+        except (TypeError, ValueError):
+            return
+        if self._cur is None:
+            return                    # 还没进入分配状态：别凭空造一个基准
+        if v != self._cur:
+            self._cur = v
+            # 让渡验证的对照组作废：前后两拍的 CPU 上限已不是同一基准，
+            # 再拿它算 ΔGPU 会把「外部改写」误判成「让渡无效」并回滚。
+            self._probe = None
+
+    def write_failed(self) -> None:
+        """处理器上限没写进计划：撤销记账，下一轮从计划真值重新起步。
+
+        不撤销的话分配器会以为「已经压到 60%」而不再重试，实际 CPU 仍在
+        100% 跑 —— 面板显示与实际相反，且「让渡无效就回滚」的判据也会错。
+        """
+        self._cur = None
+        self._probe = None
+        self._cap_reached = False
+
     # ------------------------------------------------------------------ 判定
     def classify(self) -> str:
         gpu_util = self._avg("gpu_util")

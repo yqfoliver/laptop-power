@@ -400,12 +400,20 @@ class PdBudget:
             return None
 
         self.rate_w = float(rate_w)
+        fresh_machine = False
         if machine_w is not None:
             try:
                 self.machine_w = float(machine_w)
+                fresh_machine = self.machine_w is not None
             except Exception:
                 self.machine_w = None
-        self._learn_supply(self.machine_w, self.rate_w)
+        # 上限学习必须用**本拍**的整机功耗。旧实现没拿到新值时会拿上一拍的
+        # machine_w 配这一拍的电池功率去反推 —— 负载变了就是错的（轻载旧值
+        # 配重载放电会把电源判得很大，反之判得很小）。而放电方向是「精确
+        # 上界」，错了会立刻按错误目标下修，正是换充电器兜底通道最怕的。
+        # 预测（_over_expected）仍允许用 20s 内的旧快照，那是另一回事。
+        if fresh_machine:
+            self._learn_supply(self.machine_w, self.rate_w)
         margin = self._k("pd_margin_w", 1.5)
         hold = self._k("pd_hold_s", 12.0)
         release = self._k("pd_release_s", 45.0)

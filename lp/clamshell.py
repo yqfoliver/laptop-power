@@ -95,8 +95,12 @@ class ClamshellCtl:
             with open(self.data_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
             if isinstance(d, dict) and isinstance(d.get("saved"), dict):
-                self._saved = {k: int(v) for k, v in d["saved"].items()
-                               if k in ("ac", "dc")}
+                # 空 dict 等于「没存过」：留着它会让 _save_origin 以为原值已就绪，
+                # 于是敢写「合盖不动作」却再也还原不回去（见 _save_origin 注释）
+                got = {k: int(v) for k, v in d["saved"].items()
+                       if k in ("ac", "dc")}
+                if got:
+                    self._saved = got
         except Exception:
             pass
 
@@ -149,15 +153,20 @@ class ClamshellCtl:
             ac = dc = None
         if ac is None and dc is None:
             return False
-        self._saved = {}
+        # 先攒到局部 dict，**确认非空再提交**。以前的写法是先把 self._saved
+        # 置成 {}，两个值都读不到时返回 False —— 但 _saved 已经不是 None 了，
+        # 下一轮直接走「已保存」分支，于是敢写 LIDACTION=0，而 reset() 又因为
+        # `if self._saved` 为空而还原不了 ⇒ 合盖永不睡眠，且重启也修不回来。
+        saved = {}
         for k, v in (("ac", ac), ("dc", dc)):
             if v is None:
                 continue
             # 0 = 上次没还原干净，按默认睡眠处理，避免把「不动作」固化成默认
-            self._saved[k] = v if v in (LID_HIBERNATE, LID_SHUTDOWN, LID_SLEEP) \
+            saved[k] = v if v in (LID_HIBERNATE, LID_SHUTDOWN, LID_SLEEP) \
                 else self._default_action()
-        if not self._saved:
+        if not saved:
             return False
+        self._saved = saved
         self._persist()
         return True
 

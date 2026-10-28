@@ -227,6 +227,17 @@ ok(abs(hp5.gpu_peak_w - 68.8) < 0.05, "空载 7W 不算峰值（否则到顶判�
 hp5.learn_gpu_peak(None)
 ok(abs(hp5.gpu_peak_w - 68.8) < 0.05, "None 不参与学习")
 
+# 长期不打游戏（比如两个月）后，衰减必须有上限：老实现按实际天数现算
+# （2%/天 → 60 天只剩 30%），一局轻负载就能把峰值**永久改低**，
+# 「只升不降」被反向捅穿，之后「已到顶」判据提前成立、白白少让瓦。
+hp_dec = H.HwProfile(path=tmp_json(), prof=p)
+hp_dec.data["learned"]["gpu_peak_w"] = 70.0
+hp_dec.data["learned"]["ts"] = time.time() - 60 * 86400      # 60 天前
+hp_dec.learn_gpu_peak(60.0)          # 久违的一局，只有 60W
+hp_dec.learn_gpu_peak(60.0)
+ok(hp_dec.gpu_peak_w is not None and abs(hp_dec.gpu_peak_w - 70.0) < 0.5,
+   "60 天空窗后衰减封顶（≈13%），峰值仍 70W，不会被 60W 反超", hp_dec.gpu_peak_w)
+
 print("== 7. 让渡停止点：兜底 60W -> 学到峰值后抬到真值 ==")
 ok(H.HwProfile(path=tmp_json(), prof=p).gpu_tgp_max() == 60.0, "没学过 -> 兜底 60W")
 ok(abs(hp5.gpu_tgp_max() - 70.9) < 0.05, "峰值 68.8 -> 停止点 70.9", hp5.gpu_tgp_max())

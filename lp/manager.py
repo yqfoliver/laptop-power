@@ -169,7 +169,13 @@ class Manager:
         self._ac_candidate = None
         self._ac_changed_at = 0.0
         self._ac_unstable = False
-        self._ac_settle_s = float(cfg.get("ac_settle_s", 5.0))
+        # 配置值可能来自手改文件（字符串/负数）：__init__ 里抛异常 = 程序
+        # 根本起不来，且用户只看得到「双击没反应」。这里既兜异常也夹范围。
+        try:
+            self._ac_settle_s = float(cfg.get("ac_settle_s", 5.0))
+        except (TypeError, ValueError):
+            self._ac_settle_s = 5.0
+        self._ac_settle_s = min(max(self._ac_settle_s, 0.0), 60.0)
         # GPU 三态：把硬件有没有独显回填给 GpuEco，纯核显机不该出现断电/点亮逻辑
         if self.hwprof is not None:
             try:
@@ -305,7 +311,9 @@ class Manager:
         if fg.get("process"):
             self._last_fg = dict(fg)
         st = hw.power_status()
-        on_ac = bool(st.get("ac"))
+        # 与 battery_tick 用同一个防抖值：接触抖动时不要因为一次原始采样就判成
+        # 「离电 → 续航档」，那会把刚稳定下来的档位来回切。
+        on_ac = self._ac_confirmed(st.get("ac"))
         procs = hw.list_processes()
         fexe = (fg.get("process") or "").lower()
         fullscreen = bool(fg.get("fullscreen"))
@@ -383,7 +391,7 @@ class Manager:
 
         # 自学习：这个程序以前被你安排过别的档位，照你的来
         if self.cfg.get("learn_enabled", True) and fexe:
-            r = self.learner.rule_for(fexe, bool(st.get("ac")))
+            r = self.learner.rule_for(fexe, on_ac)
             if r and r in PROFILES and r != target:
                 # 游戏/极限省电优先级最高，学习结果不覆盖；
                 # 离电时学习结果若是耗电档（office/balanced）也压回续航
@@ -403,7 +411,7 @@ class Manager:
         with self._lock:
             prof = PROFILES[name]
             st = hw.power_status()
-            on_battery = not st.get("ac")
+            on_battery = not self._ac_confirmed(st.get("ac"))
             changed: List[str] = []
             result = {"profile": name, "on_battery": on_battery, "changed": [],
                       "nvml": prof.get("nvml")}
@@ -537,7 +545,7 @@ class Manager:
                 if fg is None:
                     fg = hw.foreground()
                 self.learner.note_switch((fg.get("process") or "").lower(), name,
-                                         bool(st.get("ac")))
+                                         not on_battery)
             self.cfg["last_profile"] = name
             config.save(self.cfg)
             self.current = name
@@ -918,6 +926,19 @@ class Manager:
         # 写失败绝不能记成已生效：限频看门狗靠 _alloc_applied 判断「期望值」，
         # 记成生效会让自愈永久失效，面板显示的百分比也是假的。
         self._alloc_applied = v if done else None
+        # 这个旋钮有两个写入方（功耗分配器 / PD 保护），但只有分配器记着
+        # 「当前档位」_cur。不同步的话：PD 保护把上限放开回 100% 之后，分配器
+        # 仍以为自己在 60% —— 之后每轮都判「维持现状」，CPU↔GPU 让渡在整局
+        # 游戏里静默失效（GPU 再也拿不到 Dynamic Boost 的那几瓦）。
+        try:
+            if done:
+                if getattr(self, "current", None) == "gaming":
+                    self.alloc.sync_cur(v)
+            else:
+                # 没写进去：撤销分配器的记账，下一轮从计划真值重新起步
+                self.alloc.write_failed()
+        except Exception:
+            pass
         self._plan_cache.pop(scheme, None)
         return done
 
@@ -1157,6 +1178,23 @@ class Manager:
             self._ac_unstable = True
         return self._ac_stable
 
+    def _ac_confirmed(self, raw: Optional[bool] = None) -> bool:
+        """已确认稳定的 AC（防抖值）——巡检链的每个决策点都应该用它。
+
+        只读 `_ac_stable`（由 battery_tick 推进），不在这里推进计时：否则
+        面板轮询/多线程调用会打乱 settle 窗口。还没巡检过时退回原始读数，
+        保证启动瞬间与单元测试的行为不变。
+        """
+        v = getattr(self, "_ac_stable", None)
+        if v is not None:
+            return bool(v)
+        if raw is not None:
+            return bool(raw)
+        try:
+            return bool(hw.power_status().get("ac"))
+        except Exception:
+            return True
+
     def battery_tick(self, st: Optional[dict] = None) -> dict:
         """读一次电池 + 校准刷新率。每轮检测调一次，开销 ≈ 0.3 ms。"""
         st = st or hw.power_status()
@@ -1230,6 +1268,13 @@ class Manager:
                         self.pd.feed(False, None, 0.0)
                     except Exception:
                         pass
+                self._pd_at = time.time()
+                return
+            # 防抖窗口内（稳定值仍是 True，但原始采样已经变成「离电」）不做
+            # 压制判定：**「刚拔掉电源」和「PD 供不上」在信号上完全一样**
+            # （ac=True + 电池在放电），急着降刷会让每次拔电都黑一下屏。
+            # 真拔电会在 settle 窗口结束后的第一拍被确认，那时走上面的还原分支。
+            if self._ac_unstable:
                 self._pd_at = time.time()
                 return
             # 插电时 battery_tick 每 6 轮才采一次电池（省电策略），这里强制刷新：
@@ -2281,10 +2326,18 @@ class Manager:
     def _loop(self) -> None:
         last_exe = None
         while not getattr(self, "_stop", False):
+            # 先给个默认值：下面 try 里任何一步抛异常时，末尾的 poll 计算
+            # 仍要有 AC 可读，否则 NameError 会把巡检线程直接带走
+            on_ac_now = True
             try:
                 self.battery_tick()          # 手动档也要跟电源状态走（刷新率/电量）
-                # 离电时**绝不读独显**（NVML 会把独显驱动唤醒、破坏 D3 省电）
-                on_ac_now = bool((self.last_battery or {}).get("ac", True))
+                # 本轮的 AC 一律用 battery_tick 推进出来的防抖值：以前这里读原始
+                # 采样，接触抖动会让 _alloc_tick 判成「离电 → 交还控制权」，
+                # 分配器状态（_cur/_probe）被清空，抖动恢复后要重新爬一遍；
+                # 离电抖动还会顺手把 NVML 唤醒读独显，正好抵消 GPU Eco。
+                st = dict(hw.power_status())
+                st["ac"] = self._ac_confirmed(st.get("ac"))
+                on_ac_now = st["ac"]
                 # 原因文本保鲜：拔电/插电但档位没变时，「插电中/使用电池」要跟着改，
                 # 否则会出现「用着电池、原因却写着插电中」的乌龙。
                 # 游戏档除外 —— 那里的原因由功耗分配器实时写，别覆盖。
@@ -2300,6 +2353,7 @@ class Manager:
                     if fg.get("process"):
                         self._last_fg = dict(fg)
                     raw = hw.load_sample(procs)
+                    # 离电时**绝不读独显**（NVML 会把独显驱动唤醒、破坏 D3 省电）
                     if self.nvml.ready and on_ac_now:
                         try:
                             p = self.nvml.utilization()
@@ -2314,14 +2368,13 @@ class Manager:
                     # 2) 场景判定（把负载摘要喂进去，用于重负载保护；
                     #    前台窗口本轮只采这一次，判定/学习/原因共用同一份）
                     target = self.detect(summary, fg=fg)
-                    st = hw.power_status()
+                    # 沿用本轮开头那份（含防抖 AC）快照，不再重复读一次原始状态
                     exe = (fg.get("process") or "").lower()
 
                     # 前台程序换人时，给它建一份画像
                     if exe != last_exe:
                         if exe:
-                            self.learner.observe(exe, target or "balanced",
-                                                 bool(st.get("ac")))
+                            self.learner.observe(exe, target or "balanced", on_ac_now)
                         last_exe = exe
 
                     # 3) 切换闸门：连续命中 + 冷却期 + 游戏抢占
@@ -2343,8 +2396,15 @@ class Manager:
                     self.alloc.reset()
             except Exception as _e:
                 self._err("loop", _e)
-            poll = float(self.cfg.get("poll_seconds", 5))
-            if not (self.last_battery or {}).get("ac", True):
+            # 配置值不可信（面板 POST / 手改 json 都可能塞进字符串）：
+            # float("abc") 会在这里抛异常并把**整个巡检线程**带走 —— 程序还在
+            # 托盘里、面板还能开，但所有自动保护静默停摆。所以既兜异常又夹范围。
+            try:
+                poll = float(self.cfg.get("poll_seconds", 5))
+            except (TypeError, ValueError):
+                poll = 5.0
+            poll = min(max(poll, 1.0), 300.0)
+            if not on_ac_now:
                 poll = max(8.0, poll * 1.6)   # 离电：检测节奏放慢，自身也省电
             time.sleep(poll)
 

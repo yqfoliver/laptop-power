@@ -73,6 +73,11 @@ IGPU_HINTS = ("iris", "uhd graphics", "hd graphics", "radeon graphics",
 PEAK_LO_W, PEAK_HI_W = 20.0, 250.0
 # 峰值每天衰减一点点，给「换驱动 / 换电源 / 夏天」留出回退空间
 PEAK_DECAY_PER_DAY = 0.02
+# 但衰减必须有上限：这个值只在**下次采样时**现算，存盘值不衰减；若中间隔了
+# 两个月没打游戏，一次就把 70W 折成 38W —— 接着一局轻负载（比如 45W）连续
+# 两拍就能把峰值永久改写到 45W，等于「只升不降」的棘轮被反向捅穿，之后
+# 「已到顶」判据提前成立，白白少让瓦。7 天 ≈ 13% 的折损已足够表达「环境变了」。
+PEAK_DECAY_MAX_DAYS = 7.0
 
 
 def _data_path() -> str:
@@ -336,6 +341,7 @@ class HwProfile:
         cur = self.gpu_peak_w
         if cur is not None:
             days = max(0.0, (now - float((self.data["learned"].get("ts") or now))) / 86400.0)
+            days = min(days, PEAK_DECAY_MAX_DAYS)     # 长期不用也不会把峰值腰斩
             if days > 1.0:
                 cur = cur * ((1.0 - PEAK_DECAY_PER_DAY) ** days)
         # 连续确认（2026-10-11）：NVML 会间歇吐大值（曾见 588W/590W）。峰值

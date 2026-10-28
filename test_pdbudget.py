@@ -375,8 +375,29 @@ def test_predict_only_before_active():
     ok(r == [], "压制中不再产生预测触发")
 
 
+def test_learn_needs_fresh_machine():
+    print("== 上限学习必须用本拍整机功耗（不许拿旧值凑） ==")
+    pd = PdBudget(cfg())
+    # 先用一放电事件标定出 75W（整机 80W - 补电 5W）
+    pd.feed(True, 5.0, 5.0, machine_w=80.0)
+    ok(abs(pd.supply_w - 75.0) < 0.2, "放电标定 75W（%.1f）" % pd.supply_w)
+    src = pd._src
+    # 之后传感器掉线（machine_w=None）：如果拿上一拍的 80W 配这一拍的 8W
+    # 去反推，就会算出 72W 并下修 —— 而这个 8W 只是轻载，电源没变。
+    for _ in range(6):
+        pd.feed(True, 8.0, 5.0, machine_w=None)
+    ok(abs(pd.supply_w - 75.0) < 0.05,
+       "缺整机功耗时不上限学习（用旧值反推会把电源判小），实得 %.1f" % pd.supply_w)
+    ok(pd._src == src, "来源标签不被改写（%s）" % pd._src)
+    # 端口恢复后仍能正常学（不是把整条通道关了）
+    pd.feed(True, 5.0, 5.0, machine_w=62.0)
+    ok(pd.supply_w is not None and pd.supply_w < 75.0,
+       "有真值后照常下修（%.1f）" % (pd.supply_w or 0))
+
+
 def main():
     test_fast_path()
+    test_learn_needs_fresh_machine()
     test_supply_learning()
     test_supply_jump_guard()
     test_supply_lb_streak_guard()

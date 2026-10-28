@@ -477,7 +477,10 @@ class GpuPick:
                 "verdict": p.get("verdict", ""),
                 "p90": p.get("p90"),
             }
-        n_igpu = sum(1 for v in self.data["apps"].values() if v.get("mode") == "igpu")
+        # list() 快照：巡检线程可能在 apply_for 里插入新条目，直接遍历
+        # dict.values() 会让面板线程偶发 RuntimeError（界面表现为「调度未启用」）
+        apps = list(self.data["apps"].values())
+        n_igpu = sum(1 for v in apps if isinstance(v, dict) and v.get("mode") == "igpu")
         return {
             "enabled": self.enabled,
             "igpu_tier": self.igpu_tier,

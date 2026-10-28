@@ -245,6 +245,10 @@ class Handler(BaseHTTPRequestHandler):
                 mgr.cfg["game_list"] = [x.strip() for x in data["game_list"] if str(x).strip()]
             if "office_list" in data:
                 mgr.cfg["office_list"] = [x.strip() for x in data["office_list"] if str(x).strip()]
+            # 面板送来的值不可信（字符串/越界/None 都见过）：先按声明类型与
+            # 安全范围纠正，再热重载 —— 否则一个坏值就能让巡检链在 int()/float()
+            # 处抛异常，整条自动保护静默停摆。
+            cfgmod.sanitize(mgr.cfg)
             mgr.reload_alloc_cfg()
             cfgmod.save(mgr.cfg)
             self._json(200, {"ok": True})

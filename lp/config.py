@@ -216,7 +216,91 @@ def load() -> dict:
         if not cfg.get(k):
             cfg[k] = v
     _migrate(cfg)
+    sanitize(cfg)
     return cfg
+
+
+# 数值键的安全范围。只列「越界会造成实际后果」的键：
+#   · 时间类（poll/settle/hold）太小 = busyloop 或防抖失效，太大 = 功能等于没开
+#   · 百分比类（亮度/CPU/阈值）越界会让写入被固件拒绝或把屏幕调成全黑
+_NUM_LIMITS = {
+    "poll_seconds": (1.0, 300.0),
+    "ac_settle_s": (0.0, 60.0),
+    "pd_hold_s": (0.0, 600.0),
+    "pd_release_s": (0.0, 3600.0),
+    "pd_fast_hold_s": (0.0, 600.0),
+    "pd_pre_hold_s": (0.0, 600.0),
+    "pd_cpu_step": (1, 50),
+    "pd_cpu_min": (10, 100),
+    "pd_margin_w": (0.0, 100.0),
+    "pd_fast_w": (0.0, 200.0),
+    "pd_overhead_w": (0.0, 120.0),
+    "pd_restore_margin_w": (0.0, 200.0),
+    "pd_restore_ratio": (0.1, 1.0),
+    "pd_pre_margin_w": (0.0, 100.0),
+    "alloc_min_cpu_pct": (10, 100),
+    "alloc_step_pct": (1, 50),
+    "alloc_cooldown_seconds": (0.0, 600.0),
+    "alloc_gain_exponent": (0.05, 1.0),
+    "board_overhead_watts": (0.0, 120.0),
+    "power_envelope_watts": (30.0, 300.0),
+    "gpu_tgp_max_watts": (20.0, 250.0),
+    "gpu_sweet_watts": (20.0, 250.0),
+    "cpu_temp_limit_c": (50.0, 110.0),
+    "gpu_temp_limit_c": (50.0, 115.0),
+    "dc_refresh_hz": (0, 480),
+    "pd_low_hz_value": (0, 480),
+    "dc_brightness_cap": (0, 100),
+    "idle_dim_level": (0, 100),
+    "idle_dim_after_s": (5, 3600),
+    "battery_saver_percent": (0, 100),
+    "low_battery_percent": (0, 100),
+    "auto_game_gpu_pct": (0, 100),
+    "panel_font_scale": (0.5, 2.5),
+    "gpupick_igpu_tier": (1, 3),
+}
+
+
+def sanitize(cfg: dict) -> list:
+    """把数值/布尔键强制回「声明类型 + 安全范围」，返回被修正的键名列表。
+
+    为什么必须做：这些值会被巡检链里的 int()/float() 直接消费。面板 POST、
+    手改 config.json、旧版本残留都可能写进字符串或越界值 —— 一个
+    ``"poll_seconds": "abc"`` 就能让主巡检线程在 ``float()`` 处抛异常**永久
+    退出**：程序还在托盘里、面板还能开，但电池/刷新率/PD 保护/看门狗全部
+    停摆。这正是本项目最怕的「静默失效」，所以读盘后统一过一道护栏。
+    """
+    fixed = []
+    for key, default in DEFAULT_CONFIG.items():
+        if isinstance(default, bool):
+            v = cfg.get(key)
+            if not isinstance(v, bool):
+                cfg[key] = default
+                fixed.append(key)
+            continue
+        if not isinstance(default, (int, float)):
+            continue
+        v = cfg.get(key)
+        if v is None:
+            if default is not None:
+                cfg[key] = default
+                fixed.append(key)
+            continue
+        try:
+            v = int(v) if isinstance(default, int) else float(v)
+        except (TypeError, ValueError):
+            cfg[key] = default
+            fixed.append(key)
+            continue
+        lo_hi = _NUM_LIMITS.get(key)
+        if lo_hi:
+            v2 = min(max(v, lo_hi[0]), lo_hi[1])
+            if v2 != v:
+                fixed.append(key)
+                v = v2
+        if v != cfg.get(key):
+            cfg[key] = v
+    return fixed
 
 
 def _migrate(cfg: dict) -> None:

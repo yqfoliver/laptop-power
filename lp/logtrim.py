@@ -56,33 +56,52 @@ def log_line(path: str, line: str,
             except OSError:
                 do_trim = False
             if do_trim:
-                _trim_inplace(path, keep_lines)
+                _trim_inplace(path, keep_lines, max_bytes)
             with open(path, "a", encoding="utf-8", errors="ignore") as f:
                 f.write(line + "\n")
     except Exception:
         pass
 
 
-def _trim_inplace(path: str, keep_lines: int) -> None:
-    """读全文件、保留末尾 keep_lines 行、原地覆盖。调用方需持 _lock。"""
+def _trim_inplace(path: str, keep_lines: int, max_bytes: int = 0) -> None:
+    """读全文件、保留末尾 keep_lines 行、原地覆盖。调用方需持 _lock。
+
+    同时受「行数」与「字节」两道约束。只按行数裁是不够的：traceback 一行
+    就一两 KB，2000 行仍有 4MB —— 裁完还是超 ``max_bytes``，于是**之后每次
+    写日志都会触发一次全量读+重写**，日志写成了 O(文件大小) 的写入放大。
+    加上字节预算后，裁完必定小于 ``max_bytes``，硬兜底不会反复开火。
+    """
     try:
         if not os.path.isfile(path):
             return
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        if len(lines) <= keep_lines:
-            return
+        keep = list(lines[-keep_lines:]) if keep_lines > 0 else []
+        if max_bytes and max_bytes > 0:
+            budget = max_bytes // 2          # 留一半余量给后续追加
+            total = 0
+            picked = []
+            for ln in reversed(keep):
+                b = len(ln.encode("utf-8", "ignore"))
+                if picked and total + b > budget:
+                    break
+                picked.append(ln)
+                total += b
+            keep = list(reversed(picked))
+        if len(keep) == len(lines):
+            return                           # 本来就在预算内，不做无意义的整写
         with open(path, "w", encoding="utf-8", errors="ignore") as f:
-            f.write("...(略去较早内容，保留最近 %d 行)\n" % keep_lines)
-            f.writelines(lines[-keep_lines:])
+            f.write("...(略去较早内容，保留最近 %d 行)\n" % len(keep))
+            f.writelines(keep)
     except Exception:
         pass
 
 
-def trim_now(path: str, keep_lines: int = DEFAULT_KEEP_LINES) -> None:
+def trim_now(path: str, keep_lines: int = DEFAULT_KEEP_LINES,
+             max_bytes: int = DEFAULT_MAX_BYTES) -> None:
     """手动触发一次裁切（如部署后清掉历史大日志）。"""
     try:
         with _lock:
-            _trim_inplace(path, keep_lines)
+            _trim_inplace(path, keep_lines, max_bytes)
     except Exception:
         pass
