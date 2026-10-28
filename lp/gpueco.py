@@ -173,12 +173,13 @@ class GpuEco:
         若独显已被断（先插屏后想断）也会把它拉回来。读不到该端点（None）时
         视为无外接屏，退回原行为，不引入回归。
         """
+        # 外接屏状态是纯观测，先记一笔 —— 即便功能关闭 / 平衡档也要更新，
+        # 否则 report()/mode() 会沿用上一次的陈旧值（外接屏早已拔掉仍报强制点亮）
+        self._ext_display = bool(ext_display_connected)
         if not self.enabled:
             if self._applied == 1:
                 self.set(0)          # 用户关了功能 → 还原独显
             return
-        # 记一笔外接屏状态，供 report()/mode() 把「被迫点亮」与「主动活动」区分开
-        self._ext_display = bool(ext_display_connected)
         if active_profile == "balanced":
             return                    # 系统平衡档：一切自动化都不干预
         # 外接显示器直连独显：保屏优先于一切省电。
@@ -210,30 +211,25 @@ class GpuEco:
         self.set(want)
 
     # -------------------------------------------------- 还原 / 状态
-    def mode(self) -> str:
-        """GPU 电源三态（借鉴 GHelper GPU 模式，本机只有 eco 0/1 两个硬件位，
-        但语义上要分清楚四种情况，面板才好展示）：
+    def _mode_of(self, eco: Optional[int]) -> str:
+        """由**已读到的** eco 值推断三态（不重复读通道）。
 
         · "none"            —— 本机无独显（纯核显机），不应出现任何断电/点亮逻辑
         · "eco"             —— 独显 ACPI 断电（eco=1），离电省电形态
-        · "standard"        —— 独显活动（eco=0），正常可用
+        · "standard"        —— 独显活动（eco=0）或读不到（None，按活动对待，
+                              避免误把「读不到」当「已断电」而误导 UI）
         · "forced_standard" —— 外接显示器直连独显，护栏把独显强制点亮
                               （即便本应断电），此时断电=黑屏，优先级最高
-
-        读不到 eco（None）时，按「是否应为活动」推断：外接屏→forced_standard，
-        否则 standard（宁可不报 eco，避免误把「读不到」当「已断电」而误导 UI）。
         """
         if not self.has_dgpu:
             return "none"
         if self._ext_display:
             return "forced_standard"
-        eco = self.read()
-        if eco == 1:
-            return "eco"
-        if eco == 0:
-            return "standard"
-        # eco=None（读不到）：外接屏已在上方处理；其余按标准活动对待
-        return "standard"
+        return "eco" if eco == 1 else "standard"
+
+    def mode(self) -> str:
+        """GPU 电源三态（单独调用时读一次通道）。语义见 _mode_of。"""
+        return self._mode_of(self.read())
 
     def ensure_on_nowait(self) -> None:
         """非阻塞地把独显点亮（仅一次 DEVS 写，不等待回读）。
@@ -269,11 +265,11 @@ class GpuEco:
         return False
 
     def report(self) -> dict:
-        cur = self.read()
+        cur = self.read()                        # 只读一次，eco 与 mode 必然自洽
         return {
             "enabled": self.enabled,
             "eco": cur,                          # 1=断电 0=活动 None=读不到
-            "mode": self.mode(),                 # 三态语义：none/eco/standard/forced_standard
+            "mode": self._mode_of(cur),          # 三态语义：none/eco/standard/forced_standard
             "has_dgpu": self.has_dgpu,
             "ext_display": self._ext_display,
             "applied_by_us": self._applied,

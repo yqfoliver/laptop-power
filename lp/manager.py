@@ -680,11 +680,18 @@ class Manager:
 
     # ------------------------------------------------------------ 状态
     def status(self) -> dict:
-        st = hw.power_status()
+        st = dict(hw.power_status())
+        # 整份 status 统一使用「已确认稳定」的 AC（防抖值）：真实插拔最多延迟
+        # 一个 settle 窗口（≤ac_settle_s），换来接触抖动时 UI 不闪。注意这里只
+        # **读** _ac_stable（由巡检线程推进），绝不在 status 里调 _stable_ac ——
+        # 否则网页轮询节奏会干扰防抖计时。尚未巡检过（None）则退回原始读数。
+        ac_now = (self._ac_stable if getattr(self, "_ac_stable", None) is not None
+                  else st.get("ac"))
+        st["ac"] = ac_now
         fg = hw.foreground()
         scheme = pc.active_scheme()
         plan = self._plan(scheme) if scheme else pc.PowerPlan("")
-        on_battery = not st.get("ac")
+        on_battery = not ac_now
         knobs = {}
         for k, meta in KNOBS.items():
             # 别名可能只有 1 个（gpu_pref/pmf/wifi_saver…）：按顺序试到有为止，
@@ -702,10 +709,8 @@ class Manager:
             "mode": cur,
             "mode_label": PROFILES[cur]["label"],
             "reason": self.last_reason,
-            # 面板展示「已确认稳定」的 AC（与 eco/显示逻辑一致），避免抖动态下
-            # 文案与硬件行为打架；实例尚未巡检过时退回原始 OS 读数。
-            "ac": (self._ac_stable if getattr(self, "_ac_stable", None) is not None
-                   else st.get("ac")),
+            # ac 与上面 on_battery 同源（都是已确认稳定的防抖值），整份 payload 自洽
+            "ac": ac_now,
             # 电源事件防抖：ac_unstable=True 表示正在等 settle 窗口（接触抖动中），
             # 面板可据此展示「供电状态确认中…」
             "ac_unstable": bool(getattr(self, "_ac_unstable", False)),
@@ -801,19 +806,35 @@ class Manager:
         self._t.start()
         threading.Thread(target=self._top_proc_loop, daemon=True).start()
 
-    def _self_heal_eco(self) -> None:
-        """插电启动时若独显仍处断电态（遗留在断电/被强杀），点亮它。
+    @staticmethod
+    def _should_heal_eco(on_ac: bool, enabled: bool, eco) -> bool:
+        """启动自愈判据：插电 + 功能开启 + 当前确实断电（eco==1）。
 
-        只做「插电 + 功能开启 + 当前确为断电」这一条明确情形；弱电源档的
-        刻意断电会在下一轮 tick 重新判定，最多多一次无害的 blink。
+        注意**不能**加 `has_dgpu` 闸门：eco==1 时独显正从 WMI/NVML 消失，
+        hwprofile 恰恰会把它算成「无独显」；用 has_dgpu 当条件会让自愈
+        永远不触发（保护逻辑失效的经典陷阱）。eco==1 本身就是「有独显且
+        被断电」的铁证。
         """
-        if not self.gpu_eco.enabled:
-            return
+        return bool(enabled) and bool(on_ac) and eco == 1
+
+    def _self_heal_eco(self) -> None:
+        """启动时纠正遗留的独显断电态（上一会话被强杀可能留下 eco=1）。
+
+        · 先读一次 eco 通道：返回 1 说明确有独显且被断电 —— 顺手把
+          gpu_eco.has_dgpu 纠正为 True，否则 mode() 会一直报「无独显」。
+        · 仅「插电 + 功能开启 + eco==1」才点亮（离电本就该断电；弱电源档
+          的刻意断电会在下一轮 tick 重新判定，最多一次无害的 blink）。
+        """
         try:
-            st = hw.power_status()
-            if not st.get("ac"):
+            eco = self.gpu_eco.read()
+            # eco==1 是「有独显且断电」的铁证（此刻它从 WMI/NVML 消失，
+            # 会被 hwprofile 误判纯核显机）—— 纠正 has_dgpu，避免 UI 报「无独显」
+            if eco == 1:
+                self.gpu_eco.has_dgpu = True
+            if not self.gpu_eco.enabled:
                 return
-            if self.gpu_eco.read() == 1:
+            st = hw.power_status()
+            if self._should_heal_eco(bool(st.get("ac")), True, eco):
                 self.gpu_eco.ensure_on_nowait()
         except Exception as _e:
             self._err("eco.selfheal", _e)
@@ -1111,7 +1132,8 @@ class Manager:
         它撑不到 settle 窗口就已被「等于稳定值」分支清零。
         """
         if now is None:
-            now = time.time()
+            # 单调时钟：系统对时 / 用户改时间不应让 5s 窗口瞬间失效或永不提交
+            now = time.monotonic()
         if self._ac_stable is None:
             self._ac_stable = raw_ac
             self._ac_unstable = False
@@ -1719,6 +1741,17 @@ class Manager:
                                      force=True)
             if self.hwprof is not None:
                 self.alloc.set_hw_tgp(self.hwprof.gpu_tgp_max())
+                # 独显「在场性」只升不降：一旦确认有独显就粘住，绝不因休眠 /
+                # 临近 eco 断电时独显瞬时不可见而被降级成纯核显机（2026-10-25
+                # 误判事故的同源风险）。只有明确证据（profile 说有，或 eco==1
+                # 铁证）才升为 True，永不下调。
+                try:
+                    prof_hd = bool((getattr(self.hwprof, "profile", None) or {})
+                                   .get("has_dgpu", True))
+                    if prof_hd or self.gpu_eco.read() == 1:
+                        self.gpu_eco.has_dgpu = True
+                except Exception:
+                    pass
             # 复位 GPU Eco 的「已应用」记忆，让下次巡检重新判定，
             # 不沿用睡眠前的状态（那时可能是断电）
             self.gpu_eco._applied = None

@@ -280,6 +280,46 @@ def test_gpu_mode():
     ok(g2._ext_display is True, "tick 记录 ext_display_connected=True")
     g2.tick(False, "office", ext_display_connected=False)
     ok(g2._ext_display is False, "tick 记录 ext_display_connected=False")
+    # 功能关闭 / 平衡档时也要更新外接屏状态（否则 report 沿用陈旧的 forced_standard）
+    f3 = FakeAtk()
+    g3 = GpuEco(atk=f3)
+    g3.enabled = False
+    g3.tick(False, "office", ext_display_connected=True)
+    ok(g3._ext_display is True, "功能关闭时 tick 仍更新外接屏状态")
+    f4 = FakeAtk()
+    g4 = GpuEco(atk=f4)
+    g4.enabled = True
+    g4.tick(True, "balanced", ext_display_connected=True)
+    ok(g4._ext_display is True, "平衡档 tick 仍更新外接屏状态")
+    # report 只读一次 eco 通道：曾经 mode() 内部二次 read，导致 eco 与 mode 可能不一致
+    f5 = FakeAtk()
+    g5 = GpuEco(atk=f5)
+    g5.enabled = True
+    cnt = {"n": 0}
+    def _rd():
+        cnt["n"] += 1
+        return 0
+    g5.read = _rd
+    cnt["n"] = 0
+    r = g5.report()
+    ok(cnt["n"] == 1, "report 只读一次 eco 通道（eco 与 mode 必然自洽）")
+    ok(r["eco"] == 0 and r["mode"] == "standard", "report: eco/mode 同源自洽")
+
+
+def test_self_heal_predicate():
+    print("== 启动自愈判据（不得被 has_dgpu 挡住）==")
+    from lp.manager import Manager
+    S = Manager._should_heal_eco
+    ok(S(True, True, 1) is True, "插电 + 开启 + eco=1 → 自愈")
+    ok(S(True, True, 0) is False, "插电 + eco=0 → 无需自愈")
+    ok(S(True, True, None) is False, "读不到 eco（None）→ 不自愈")
+    ok(S(False, True, 1) is False, "离电 + eco=1 → 不自愈（本就该断电）")
+    ok(S(True, False, 1) is False, "功能关闭 → 不自愈（尊重手设）")
+    # 关键回归：判据签名里没有 has_dgpu —— 即便「无独显」也照常自愈，
+    # 因为 eco=1 时独显不可见会被误判成纯核显机
+    import inspect
+    params = list(inspect.signature(Manager._should_heal_eco).parameters)
+    ok("has_dgpu" not in params, "判据不得依赖 has_dgpu（否则自愈永不触发）")
 
 
 if __name__ == "__main__":
@@ -295,4 +335,5 @@ if __name__ == "__main__":
     test_ensure_on_nowait()
     test_manager_power_events()
     test_gpu_mode()
+    test_self_heal_predicate()
     print("\n全部通过：%d 项" % PASS)
