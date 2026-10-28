@@ -214,6 +214,24 @@ feed(pd2, True, 20.0, 60.0, n=1)          # 放电 20W -> est=40W 精确上界
 ok(pd2.supply_firm and pd2.learn_info.get("how") == "放电标定",
    "放电首拍即标定并记录", pd2.learn_info)
 
+# ---- 存档层必须跟学习层用同一个下限（10W）----
+# 学习侧 2026-10-21 就把下限从 25W 降到 10W 了（~20W 手机级充电器是真值），
+# 但存档/沿用/归档仍写死 25W：学到的 18W 存不进去、下次沿用不了、历史缺段。
+src = ps.PdSource(path=tmp_path())
+src.note_ac(False)
+src.note_ac(True)                          # 开启一次会话
+src.save(18.2, firm=True)
+ok(src.state.get("current") is not None, "18W 也要能存档（不是异常值）",
+   src.state.get("current"))
+# 程序重启（充电器没换、AC 没断）：应能沿用这个 18W
+src2 = ps.PdSource(path=src.path)
+a = src2.adopt()
+ok(a is not None and abs(a["watts"] - 18.2) < 0.05,
+   "冷启动能沿用 18W（否则弱电源第一分钟又白放电池）", a)
+src.note_ac(False)                         # 拔电 -> 归档
+ok(any(abs(h.get("watts", 0) - 18.2) < 0.05 for h in src.state["history"]),
+   "18W 会话也要进历史", src.state["history"])
+
 print("\n%d 项断言，失败 %d" % (N[0], len(FAILS)))
 for f in FAILS:
     print("  FAIL:", f)

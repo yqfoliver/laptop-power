@@ -60,6 +60,14 @@ COLD_REUSE_S = 600.0
 # 归档最近多少次会话（面板显示「上次 130W / 本次 89W」用）
 HISTORY_MAX = 5
 
+# 可接受的供电能力区间。**下限必须与 pdbudget.SUPPLY_MIN_W 保持一致**：
+# 2026-10-21 把学习侧的下限从 25W 降到 10W，因为 ~20W 档（5V/3A、9V/2.2A 的
+# 手机级充电器）是真值，旧下限会把 18W 实到当异常丢掉。但这一层当时漏改了：
+# 存档/沿用/归档仍用 25W 门槛，于是「学到的 18W」存不进去、下次也沿用不了，
+# 历史里还缺这一段 —— 同一份数据的其它消费点没跟上，等于修复只做了一半。
+SUPPLY_MIN_ADOPT_W = 10.0
+SUPPLY_MAX_ADOPT_W = 330.0
+
 
 class PdSource:
     """跟踪供电会话，并为每个会话单独记住测到的供电能力。"""
@@ -127,7 +135,7 @@ class PdSource:
             w = float(cur.get("watts"))
         except Exception:
             return
-        if not (25.0 <= w <= 330.0):
+        if not (SUPPLY_MIN_ADOPT_W <= w <= SUPPLY_MAX_ADOPT_W):
             return
         h: List[Dict[str, Any]] = list(self.state.get("history") or [])
         # 拔电期间 note_ac 每轮都会走到这里，靠下面的 current=None 自然去重
@@ -171,7 +179,7 @@ class PdSource:
             ts = float(cur.get("ts", 0))
         except Exception:
             return None
-        if not (25.0 <= w <= 330.0):
+        if not (SUPPLY_MIN_ADOPT_W <= w <= SUPPLY_MAX_ADOPT_W):
             return None
         if ts <= 0 or (time.time() - ts) > COLD_REUSE_S:
             return None
@@ -193,7 +201,7 @@ class PdSource:
             w = float(watts)
         except Exception:
             return
-        if not (25.0 <= w <= 330.0):
+        if not (SUPPLY_MIN_ADOPT_W <= w <= SUPPLY_MAX_ADOPT_W):
             return
         self.adopted = False
         cur = {"watts": round(w, 1),
