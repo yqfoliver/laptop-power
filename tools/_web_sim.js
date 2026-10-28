@@ -127,11 +127,21 @@ if (!main) { console.log("FAIL: 找不到主脚本（function renderBatt）"); p
 
 // fetch 桩：payload / 失败模式 / 调用记录都由测试改
 const net = {
-  // 初值给一份最小合法 payload：页面加载时就会自己 tick() 一次，若这里给 null
-  // 会让那次 render 抛异常，污染后续断言
-  payload: { mode: "balanced", mode_label: "平衡", auto: true, foreground: "",
-             battery_info: { care: {} }, alloc: {}, thermal: {}, fan: {},
-             gpupick: { enabled: true, current: {} }, gpu_eco: {}, pd: {}, load: {} },
+  // 初值必须是**完整**的一份 payload：页面加载时就会自己 tick() 一次，这次
+  // 请求的续体可能在测试中途才落地，把 state 覆盖成这里的内容。给个残缺对象
+  // 会让后续断言拿到空 care，误报成「回执丢了」。
+  payload: {
+    mode: "balanced", mode_label: "平衡", auto: true, foreground: "",
+    ac: true, battery_info: {
+      percent: 76, charging: true, care: {
+        enabled: true, score: 88, target_limit: 80, intent_active: false,
+        calib_due: false, charge_limit: { supported: true, value: 80 },
+        charge_line: "充电上限 80%（养护）",
+      },
+    },
+    alloc: {}, thermal: {}, fan: {}, gpu_eco: {}, pd: {}, load: {},
+    gpupick: { enabled: true, current: {} },
+  },
   fail: false, calls: [],
 };
 function fetchStub(url, opt) {

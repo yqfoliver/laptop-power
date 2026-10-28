@@ -276,11 +276,13 @@ function renderModes(){
 
 function render(){
   // 字体比例（config.panel_font_scale，0.85~1.3）：CSS zoom 直接缩放整个面板内容。
-  // 窗口大小不随它变——调大后底部可能需要滚动，属于预期行为
+  // 窗口大小不随它变——调大后底部可能需要滚动，属于预期行为。
+  // 只在真的变了才写：每 2 秒无条件赋一次 zoom 会触发整页重排（白费电）。
   try{
     var fs = parseFloat(state.panel_font_scale);
-    if(fs && Math.abs(fs-1)>0.01) document.documentElement.style.zoom = fs;
-    else document.documentElement.style.zoom = "";
+    var wantZoom = (fs && Math.abs(fs-1)>0.01) ? String(fs) : "";
+    if(document.documentElement.style.zoom !== wantZoom)
+      document.documentElement.style.zoom = wantZoom;
   }catch(e){}
   document.getElementById("mode").textContent = state.mode_label||"—";
   // 不写「原因：」前缀：模式标题 + 右下「前台 xxx」已经交代上下文，
@@ -493,7 +495,7 @@ function renderLoad(){
   const el = document.getElementById("loadState");
   const st = L.state||"未知";
   el.textContent = st + (L.heavy?" · 已保护":"");
-  el.className = "r" + (L.heavy?" warn":(st==="轻负载"?"":""));
+  el.className = "r" + (L.heavy?" warn":"");
   const b = Math.max(0, Math.min(100, state.busy||0));
   const bar = document.getElementById("loadBar");
   bar.style.width = b + "%";
@@ -501,7 +503,8 @@ function renderLoad(){
   document.getElementById("loadPct").textContent = b + "%";
   const f = v => (v===null||v===undefined) ? "—" : Math.round(v)+"%";
   // 独显已断电时「独显 —」是纯噪音（功耗卡里已经写着「已断电」）
-  const gpuOff = (state.gpu_eco||{}).eco === 1;
+  const GE = state.gpu_eco||{};
+  const gpuOff = (GE.mode === "eco") || (GE.mode == null && GE.eco === 1);
   const segs = ["CPU " + f(L.cpu), "磁盘 " + f(L.disk), "网络 " + f(L.net)];
   if(!gpuOff) segs.push("独显 " + f(L.gpu));
   if(state.cooldown_left>0) segs.push("冷却 " + state.cooldown_left + "s");
@@ -627,7 +630,17 @@ function setOffline(msg){
   if(msg){ fgEl.textContent = msg; fgEl.style.color = "var(--amber)"; }
 }
 
+// 轮询防叠加：上一拍还没回来时不再发新的（网络慢时会有 3 个请求同时在飞，
+// 晚到的旧响应会把新状态覆盖掉）。6s 超时保证这个锁最长只卡 6 秒。
+let ticking = false;
 async function tick(){
+  if(ticking) return;
+  ticking = true;
+  try{
+    await tickOnce();
+  }finally{ ticking = false; }
+}
+async function tickOnce(){
   let s;
   try{
     s = await get("/api/status");
