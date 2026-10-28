@@ -11,6 +11,9 @@
     --text:#E7E9EC; --muted:#969CA5;
     --accent:#4C8DFF; --accent-soft:#1E2A3F; --green:#4ADE80; --amber:#FBBF24; --red:#F87171;
     --accent-rgb:76,141,255;
+    /* 「未知」态的条色（电量读不到时用）。不定义会导致 var(--track) 成为
+       无效声明（computed 成 transparent），与「空条」无法区分。 */
+    --track:#3A4048;
   }
   *{box-sizing:border-box}
   html{color-scheme:dark}
@@ -114,10 +117,8 @@
     }
     return false;
   }
-  setTimeout(function(){
-    if(!tick()){ setInterval(function(){ tick(); }, 1200); }
-    else{ setInterval(function(){ tick(); }, 1200); }
-  }, 250 + Math.random()*400);
+  // 先错开随机延迟再开始抢：两个标签同秒打开时不会同拍写入（谁先写谁赢）
+  setTimeout(function(){ tick(); setInterval(tick, 1200); }, 250 + Math.random()*400);
 })();
 </script>
 </head>
@@ -233,15 +234,15 @@ const MODES = [
   {k:"saver",    ico:"🪫", lb:"省电"},
   {k:"balanced", ico:"⚖️", lb:"平衡"},
 ];
-const MODE_LABEL = {gaming:"游戏·最高帧", office:"办公·跟手", battery:"续航·最长",
-                    saver:"极限续航", balanced:"系统平衡"};
 
 let state = {};
 
-function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+// 档位中文名一律用后端 mode_label / MODES[].lb，不在这里维护第二份
+// （原来还有一份 MODE_LABEL 常量，从未被读 —— 两份文案迟早对不上）
 function fmtDur(s){
   if(!s&&s!==0) return "—";
-  if(s<60) return s+" 秒";
+  // 秒数可能是小数（eta_minutes*60），不四舍五入会显示「3.7999999 秒」
+  if(s<60) return Math.round(s)+" 秒";
   if(s<3600) return (s/60).toFixed(0)+" 分";
   return (s/3600).toFixed(1)+" 小时";
 }
@@ -252,13 +253,25 @@ function pct(v){ return (v===null||v===undefined) ? "—" : Math.round(v)+"%"; }
 function renderModes(){
   const box = document.getElementById("modes");
   try{
-    box.innerHTML = MODES.map(m=>
-      `<button class="mode ${state.mode===m.k?"on":""}" data-k="${m.k}">
-         <span class="ico">${m.ico}</span><span class="lb">${m.lb}</span>
-       </button>`).join("");
+    // 只建一次，之后只改 class。
+    // 旧写法每 2 秒重建这 5 个按钮：鼠标按下的那一瞬间若正好撞上重建，
+    // mousedown 的目标被移出 DOM，click 只会派发到父节点 .modes —— 按钮
+    // 的 onclick 永不执行，用户看到的就是「点了没反应」（且 hover 会闪）。
+    if(box.children.length !== MODES.length){
+      box.innerHTML = MODES.map(m=>
+        `<button class="mode" data-k="${m.k}">
+           <span class="ico">${m.ico}</span><span class="lb">${m.lb}</span>
+         </button>`).join("");
+      box.querySelectorAll(".mode").forEach(b=>{
+        b.onclick = ()=>post("/api/mode",{mode:b.dataset.k}).then(tick).catch(()=>{});
+      });
+    }
+    box.querySelectorAll(".mode").forEach(b=>{
+      const on = (state.mode === b.dataset.k);
+      if(b.classList.contains("on") !== on) b.classList.toggle("on", on);
+    });
   }catch(e){ document.title = "面板渲染异常(RM): " + ((e&&e.message)||e); return; }
-  if(!box.firstChild){ document.title = "面板渲染异常(RM-empty)"; return; }
-  box.querySelectorAll(".mode").forEach(b=>b.onclick=()=>post("/api/mode",{mode:b.dataset.k}));
+  if(!box.firstChild){ document.title = "面板渲染异常(RM-empty)"; }
 }
 
 function render(){
@@ -289,6 +302,7 @@ function render(){
   // 和大进度条是电池信息的唯一归属，头部再报一遍纯重复（2026-10-20
   // UI 精简）。头部只剩标题 + 前台程序。
   const fgEl = document.getElementById("fg");
+  fgEl.style.color = "";        // 复位上一次「未连接」的告警色，否则连上后仍是黄的
   if(state.foreground){
     // 去掉 .exe 后缀；不再拼《窗口标题》—— 标题又长又和程序名重复
     fgEl.textContent = "前台 " + state.foreground.replace(/\.exe$/i, "");
@@ -307,11 +321,14 @@ function renderBatt(){
   const B = state.battery_info||{};
   const st = document.getElementById("battState");
   const pctv = B.percent;
+  // ac_unstable：AC 插拔正在等 settle 窗口（接触抖动中），此时 state.ac 还是旧值。
+  // 不标出来用户会觉得「插上了怎么还说在用电池」——后端算了这个字段就必须用上。
+  const pend = state.ac_unstable ? "（确认中）" : "";
   if(state.ac){
-    st.textContent = "已接电源" + (B.charging?"（充电中）":"");
+    st.textContent = "已接电源" + (B.charging?"（充电中）":"") + pend;
     st.className = "r";
   }else{
-    st.textContent = (pctv==null?"电池":"电池 "+pctv+"%") + (B.discharging?"（放电中）":"");
+    st.textContent = (pctv==null?"电池":"电池 "+pctv+"%") + (B.discharging?"（放电中）":"") + pend;
     st.className = "r" + (pctv!=null&&pctv<=20 ? " warn":"");
   }
   const bar = document.getElementById("battBar");
@@ -347,7 +364,11 @@ function renderBatt(){
   if(care.enabled && care.score!=null) parts.push("养护 " + care.score + " 分");
   if(B.capacity_mwh && B.full_mwh)
     parts.push((B.capacity_mwh/1000).toFixed(1) + "/" + (B.full_mwh/1000).toFixed(1) + " Wh");
-  if(!state.ac) parts.push("核显模式");
+  // 独显状态按 GPU 三态如实说：旧代码「只要离电就写核显模式」，但外接屏直连
+  // （护栏把独显强制点亮）或调度被关掉时独显其实在工作 —— 那是假信息。
+  const GE = state.gpu_eco||{};
+  if(GE.mode === "eco" || (GE.mode == null && GE.eco === 1)) parts.push("核显模式");
+  else if(GE.mode === "forced_standard") parts.push("外接屏·独显开");
   if(B.display_changed && B.display_hz!=null) parts.push("已限帧 " + B.display_hz + " Hz");
   document.getElementById("battDetail").textContent = parts.join(" · ");
 
@@ -355,7 +376,6 @@ function renderBatt(){
 
   const ok = document.getElementById("battOk");
   const adv = document.getElementById("battAdv");
-  const cl = (care.charge_limit)||{};
   const pd = state.pd||{};
   let okText = "", advText = "";
   if(!state.ac){
@@ -405,6 +425,10 @@ function renderBatt(){
 // 充电上限：养护不该是「永远 80%」——要带出门 / 该做满充校准时，充满是对的。
 // 所以这里给的是一次**有期限**的「本次充满」，而不是一个把养护关掉的永久开关。
 const CHG_REASON = {manual:"手动", travel:"要出门", calibrate:"满充校准"};
+// 操作结果要在面板上「停一会儿」：写进 DOM 后 2 秒的轮询会重画这一行，
+// 旧代码 line.textContent = r.msg; tick(); 等于把反馈当场擦掉 ——
+// 「已发起提权，等 UAC」这种最需要用户看见的话变成一闪而过。
+let chgMsg = "", chgMsgUntil = 0;
 function renderCharge(care){
   const line = document.getElementById("chgLine");
   const btns = document.getElementById("chgBtns");
@@ -424,6 +448,11 @@ function renderCharge(care){
   bFull.className = "btn" + (care.intent_active ? " on" : "");
   bRst.className  = "btn" + ((!care.intent_active && cl.value<=tgt) ? " on" : "");
 
+  if(chgMsg && Date.now() < chgMsgUntil){
+    line.style.color = "var(--accent)";     // 操作回执：与常规行区分开
+    line.textContent = chgMsg;
+    return;
+  }
   let t = care.charge_line || ("充电上限 " + cl.value + "%");
   // 下发失败/被回滚要显眼：这是「按钮按了但没用」的唯一可见信号
   const LS = (care.limit_state||{}).state;
@@ -446,10 +475,16 @@ async function chgSet(act){
   try{
     const r = await post("/api/charge_limit",{action:act});
     // 反馈必须如实：提权是「已发起」，不是「已生效」
-    line.textContent = (r && r.msg) ? r.msg : (r && r.ok ? "已生效" : "操作失败");
+    chgMsg = (r && r.msg) ? r.msg : (r && r.ok ? "已生效" : "操作失败");
+    chgMsgUntil = Date.now() + 7000;
+    line.style.color = "var(--accent)";
+    line.textContent = chgMsg;
     tick();
   }catch(e){
-    line.textContent = "操作失败：" + ((e&&e.message)||e);
+    chgMsg = "操作失败：" + ((e&&e.message)||e);
+    chgMsgUntil = Date.now() + 7000;
+    line.style.color = "var(--amber)";
+    line.textContent = chgMsg;
   }
 }
 
@@ -473,6 +508,9 @@ function renderLoad(){
   document.getElementById("loadDetail").textContent = segs.join(" · ");
 }
 
+// 切换失败的回执（临时占用右上角那格：那里本来显示「华硕性能模式」，
+// 正常情况下是空的或外部改动提示，借它显示错误不会改变面板高度）
+let thMsg = "", thMsgUntil = 0;
 function renderThermal(){
   const th = state.thermal||{};
   const fan = state.fan||{};
@@ -489,8 +527,14 @@ function renderThermal(){
   const TMAP = {auto:["自动","平衡"], quiet:["静音","安静","节能"], perf:["全速","性能"]};
   const tsel = TMAP[th.mode] || [];
   const tmatch = tsel.some(s => fan.perf_label && fan.perf_label.indexOf(s) >= 0);
-  document.getElementById("thAsus").textContent =
-    (fan.perf_label && !tmatch) ? ("华硕性能模式：" + fan.perf_label) : "";
+  const thEl = document.getElementById("thAsus");
+  if(thMsg && Date.now() < thMsgUntil){
+    thEl.textContent = thMsg;
+    thEl.style.color = "var(--amber)";
+  }else{
+    thEl.style.color = "var(--muted)";
+    thEl.textContent = (fan.perf_label && !tmatch) ? ("华硕性能模式：" + fan.perf_label) : "";
+  }
   const cur = th.mode||"auto";
   [["thAuto","auto"],["thQuiet","quiet"],["thPerf","perf"]].forEach(([id,m])=>{
     const btn=document.getElementById(id);
@@ -508,7 +552,9 @@ function renderAlloc(){
   }else{
     el.textContent = A.verdict_cn || "判定中";
     el.className = "r";
-    if(!state.ac) el.textContent = "非游戏档";
+    // 离电不等于「非游戏档」：分配器在电池上也会工作（用放电功率当整机真值）。
+    // 只有确实没在分配时才这么写，否则会把真实判定盖掉。
+    if(A.active === false) el.textContent = "非游戏档";
   }
   const set = (id, barid, tid, val, denom, temp, color) => {
     const el = document.getElementById(id);
@@ -520,9 +566,14 @@ function renderAlloc(){
       if(te) te.textContent = temp;
     }
     const b = document.getElementById(barid);
-    if(b && val!==null && val!==undefined && denom>0){
+    if(!b) return;
+    if(val!==null && val!==undefined && denom>0){
       b.style.width = Math.max(0, Math.min(100, 100*val/denom)) + "%";
       b.style.background = color;
+    }else{
+      // 读数没了（独显断电 / 传感器掉线）必须把条清回去，否则数字写着「—」
+      // 而进度条还留着上一次的宽度和颜色 —— 自相矛盾的假图
+      b.style.width = "0%";
     }
   };
   const env = A.envelope_w || 110;
@@ -551,26 +602,65 @@ function renderAlloc(){
   whyEl.textContent = why + (ev ? (why ? " ｜ " : "") + "最近动作 " + ev : "");
 }
 
-async function get(u){const r=await fetch(u);return r.json();}
-async function post(u,d){const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(d||{})});return r.json();}
+// 统一取 JSON：带 6s 超时 + no-store。
+// 没有超时的话，一次挂住的请求会让后续每 2 秒的轮询全部堆积（fetch 永不 resolve），
+// 面板停在旧数字上、一点提示都没有 —— 「静默失效」的典型。cache:no-store 避免
+// WebView2 把 /api/status 的 GET 走缓存（拿到的是上一轮数据）。
+async function fetchJSON(u, opt){
+  const ctl = new AbortController();
+  const timer = setTimeout(()=>ctl.abort(), 6000);
+  try{
+    const r = await fetch(u, Object.assign({signal: ctl.signal, cache: "no-store"}, opt||{}));
+    return await r.json();            // 4xx 也带 JSON 体（{error:..}），照常取
+  }finally{ clearTimeout(timer); }
+}
+async function get(u){ return fetchJSON(u); }
+async function post(u,d){
+  return fetchJSON(u, {method:"POST", headers:{"Content-Type":"application/json"},
+                       body: JSON.stringify(d||{})});
+}
+
+// 与后端失联时把提示放在头部副标题（单行省略号，不改面板高度）
+function setOffline(msg){
+  const fgEl = document.getElementById("fg");
+  if(!fgEl) return;
+  if(msg){ fgEl.textContent = msg; fgEl.style.color = "var(--amber)"; }
+}
 
 async function tick(){
+  let s;
   try{
-    state = await get("/api/status");
+    s = await get("/api/status");
+  }catch(e){
+    // 拿不到状态：保留最后一帧数值，但必须让用户知道是「连不上」而不是「没变化」
+    setOffline("⚠ 面板未连接，正在重试…");
+    return;
+  }
+  state = s;
+  try{
     render();
   }catch(e){
     // 渲染链上任何一环异常都不该无声无息（曾经 renderModes 静默失效没人发现）
     var st = ((e && e.stack) || "").split("\n")[1] || "";
     document.title = "面板渲染异常: " + ((e && e.message) || e) + " @" + st.trim().slice(0,80);
+    return;
   }
+  // 恢复正常：把上一次的错误标题清掉，否则标题永远停在「面板渲染异常」
+  if(document.title.indexOf("面板渲染异常") === 0) document.title = "笔记本电源自适应";
 }
 
-document.getElementById("autoBtn").onclick = ()=>post("/api/auto",{on:!state.auto});
+document.getElementById("autoBtn").onclick = ()=>post("/api/auto",{on:!state.auto}).then(tick).catch(()=>{});
+// 「本次充满 / 回养护」两个按钮的绑定 —— 曾经整个 chgSet() 定义了却**从未
+// 绑定**，两个按钮点了什么都不会发生（后端接口一直在，纯前端漏接）。
+document.getElementById("chgFull").onclick    = ()=>chgSet("full");
+document.getElementById("chgRestore").onclick = ()=>chgSet("restore");
 document.getElementById("thAuto").onclick  = ()=>setThermal("auto");
 document.getElementById("thQuiet").onclick = ()=>setThermal("quiet");
 document.getElementById("thPerf").onclick  = ()=>setThermal("perf");
 async function setThermal(m){
-  await post("/api/thermal_set",{mode:m});
+  // 失败必须有痕迹：后端 400/超时都会 reject，没有 catch 就只剩「点了没反应」
+  try{ await post("/api/thermal_set",{mode:m}); thMsg = ""; }
+  catch(e){ thMsg = "切换失败：" + ((e&&e.message)||e); thMsgUntil = Date.now()+6000; }
   tick();
 }
 
@@ -639,12 +729,20 @@ function renderGpuPick(){
     (cur.note ? (" · " + cur.note) : "") + " · 下次启动生效" +
     (window.__gpExtra || "");
 }
-async function gpSet(m){ await post("/api/gpupick_set",{mode:m}); tick(); }
+async function gpSet(m){
+  try{ await post("/api/gpupick_set",{mode:m}); }
+  catch(e){
+    // 后端会明确拒绝（如调度未启用）并给出原因，别静默吞掉
+    document.getElementById("gpLine").textContent = "设置失败：" + ((e&&e.message)||e);
+  }
+  tick();
+}
 document.getElementById("gpIgpu").onclick = ()=>gpSet("igpu");
 document.getElementById("gpDgpu").onclick = ()=>gpSet("dgpu");
 document.getElementById("gpAuto").onclick = ()=>gpSet("");
 document.getElementById("gpProbe").onclick = async ()=>{
-  await post("/api/gpupick_probe",{seconds:45});
+  try{ await post("/api/gpupick_probe",{seconds:45}); }
+  catch(e){ document.getElementById("gpLine").textContent = "试探启动失败：" + ((e&&e.message)||e); }
   tick();
 };
 
@@ -681,7 +779,10 @@ setInterval(tick, 2000);
     window.chrome.webview.addEventListener("message", function(e){
       try{
         var d = JSON.parse(e.data);
-        if(d && d.__panel_clamped) document.body.style.overflowY = "auto";
+        // 宿主在「高度超出工作区被钳住」和「不再钳」两种状态切换时会各发一次；
+        // 旧代码只认 true，于是被钳过一次的面板会永久挂着滚动条。
+        if(d && typeof d.__panel_clamped !== "undefined")
+          document.body.style.overflowY = d.__panel_clamped ? "auto" : "hidden";
       }catch(err){}
     });
   }catch(e){}
