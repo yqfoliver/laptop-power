@@ -30,6 +30,11 @@ except Exception:
 
 WPM = 0  # 消息泵是否可用
 
+# 系统电源广播（WM_POWERBROADCAST 的 wParam）
+PBT_APMSUSPEND = 0x0004
+PBT_APMRESUMESUSPEND = 0x0007
+PBT_APMRESUMEAUTOMATIC = 0x0012
+
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -199,6 +204,12 @@ def main(argv=None) -> int:
     if not traylib_tray.start("笔记本电源自适应"):
         print("[提示] 托盘图标创建失败，面板仍可通过 %s 访问" % url)
     _TRAY[0] = traylib_tray
+
+    # 系统睡眠/唤醒 → 独显打点。必须挂在**托盘窗口**上：它是开机就存在的
+    # 隐藏顶层窗口；原生面板窗口要用户点开才创建，挂在那边等于「没打开过
+    # 面板就完全不保护」（曾实测：带 eco=1 睡下去，唤醒后独显不可见被误判
+    # 纯核显机）。面板那份保留做冗余，两边都调是幂等的。
+    traylib_tray.power_handler = lambda w: _power_event(mgr, w)
 
     # 自启以注册表为准；顺手刷新一次 vbs，让候选解释器列表跟上当前环境
     _AUTO[0] = bool(config.autostart_enabled())
@@ -504,6 +515,23 @@ def register_hotkey(hwnd: int) -> bool:
         return bool(u.RegisterHotKey(hwnd, 1, 0x0002 | 0x0001, 0x50))   # CTRL|ALT, 'P')
     except Exception:
         return False
+
+
+def _power_event(mgr, wparam: int) -> None:
+    """把系统电源广播分派给 Manager（挂起前点亮独显 / 唤醒后重探硬件）。
+
+    单独抽成函数是为了能被测试直接调用：这条链此前只挂在「用户点开才创建」
+    的原生面板窗口上，等于默认完全不生效 —— 静默失效，测不出来就永远不知道。
+    """
+    if mgr is None:
+        return
+    try:
+        if wparam == PBT_APMSUSPEND:
+            mgr.on_suspend()
+        elif wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC):
+            mgr.on_resume()
+    except Exception as e:
+        _log_exit("电源事件处理异常 %r" % e)
 
 
 def tray_menu(mgr):

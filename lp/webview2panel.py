@@ -222,6 +222,7 @@ class WebView2Panel:
         self.failed = False
         self._note = ""
         self._coinit = False
+        self._ensuring = False   # 异步初始化链在途（防重复建环境/控制器）
         self._nav_url = None
         self._loader = None
         self._pumping = False
@@ -411,6 +412,11 @@ class WebView2Panel:
         """准备窗口与 WebView2 环境（异步：靠主线程消息泵推进回调）"""
         if self.ready or self.failed:
             return self.ready
+        if self._ensuring:
+            # 上一次的环境/控制器还在异步建立中。这里如果再来一遍，会在同一个
+            # HWND 上建第二个控制器（必失败）→ 把 failed 置真，把本来能成功的
+            # 那一次也一起废掉。等回调落地即可。
+            return False
         if not self._ensure_window():
             self.failed = True
             return False
@@ -433,10 +439,12 @@ class WebView2Panel:
             return S_OK
 
         handler = _com_object([on_env])
+        self._ensuring = True
         hr = self._create_env(None, self._data_dir, None, handler)
         if hr != S_OK:
             self._note = "CreateEnvironment hr=0x%X" % (hr & 0xFFFFFFFF)
             self.failed = True
+            self._ensuring = False
         return not self.failed
 
     @staticmethod
@@ -457,6 +465,7 @@ class WebView2Panel:
         if result != S_OK or not env:
             self._note = "环境创建失败 hr=0x%X" % (result & 0xFFFFFFFF)
             self.failed = True
+            self._ensuring = False
             return
         self.env = env
         self._addref(env)          # 保活，否则回调返回后指针随时失效
@@ -470,16 +479,19 @@ class WebView2Panel:
         fn = _vcall(env, 3, HRESULT, [wintypes.HWND, c_void_p])   # CreateController
         if not fn:
             self.failed = True
+            self._ensuring = False
             return
         hr = fn(env, self.hwnd, handler)
         if hr != S_OK:
             self._note = "CreateController hr=0x%X" % (hr & 0xFFFFFFFF)
             self.failed = True
+            self._ensuring = False
 
     def _on_controller_created(self, result, ctrl):
         if result != S_OK or not ctrl:
             self._note = "控制器创建失败 hr=0x%X" % (result & 0xFFFFFFFF)
             self.failed = True
+            self._ensuring = False
             return
         self.controller = ctrl
         self._addref(ctrl)         # 同上：controller 也要自己持有引用
@@ -493,11 +505,13 @@ class WebView2Panel:
             if g and g(ctrl, byref(wv)) == S_OK:
                 self.webview = wv.value
             self.ready = True
+            self._ensuring = False
             self._install_height_watch()
             self._navigate()
         except Exception as e:
             self._note = "控制器初始化异常 %r" % e
             self.failed = True
+            self._ensuring = False
 
     def _navigate(self) -> None:
         if not self.webview or self._nav_url == self.url:
@@ -722,10 +736,14 @@ class WebView2Panel:
             return False
         self.ensure()                     # 环境/控制器异步建立
         if not self.ready:
-            self._pump_wait(2.0)
+            # 冷启动要拉 Chrome 进程树，本机实测 2s 上下，留 3s 余量
+            self._pump_wait(3.0)
         if not self.ready or not self.webview:
-            # 没就绪绝不接管：宁可让调用方回退 GDI/浏览器，也不能给用户一个白窗口
-            self.failed = True
+            # 这里**不能**置 failed：WebView2 首帧偶尔要 3s 以上，一旦把 failed
+            # 钉死，本轮会话就再也用不上网页面板（每次点开都直接回退），
+            # 用户看到的是「点了没反应」。failed 只留真实的初始化错误；
+            # 超时只是这次没赶上，下次打开会重新走一遍（_ensuring 会自愈）。
+            self._note = self._note or "引擎还在启动（首帧较慢），可再点一次打开"
             self.hide()
             return False
         self._navigate()                  # URL 变化时重新导航

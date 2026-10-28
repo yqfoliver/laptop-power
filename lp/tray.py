@@ -33,6 +33,10 @@ WM_RBUTTONUP = 0x0205
 WM_CONTEXTMENU = 0x007B
 WM_COMMAND = 0x0111
 WM_HOTKEY = 0x0312
+WM_POWERBROADCAST = 0x0218
+PBT_APMSUSPEND = 0x0004
+PBT_APMRESUMESUSPEND = 0x0007
+PBT_APMRESUMEAUTOMATIC = 0x0012
 TPM_LEFTALIGN = 0x0000
 TPM_RIGHTBUTTON = 0x0002
 TPM_BOTTOMALIGN = 0x0008
@@ -180,6 +184,10 @@ class Tray:
         # HICON 且从不销毁，切档通知频繁时会线性泄漏 GDI 句柄。
         self._hicon = 0
         self._taskbar_created = 0      # explorer 重启后重建图标用的消息 ID
+        # 系统电源事件回调（挂起/唤醒）。托盘窗口是**开机就建**的隐藏顶层窗口，
+        # 所以它是唯一保证存在的电源广播接收者 —— 原生面板窗口要用户点开才建，
+        # 把睡眠保护挂在面板上等于「没打开过面板就完全不保护」（实测静默失效）。
+        self.power_handler = None       # callable(wparam) -> None
         # —— 可测试性 ——
         self._test_mode = False        # True：_popup 只计数不真弹菜单
         self._popup_n = 0              # 右键菜单被请求的次数（测试断言用）
@@ -215,6 +223,16 @@ class Tray:
             if msg == WM_HOTKEY:
                 self._dispatch(MENU_OPEN)
                 return 0
+            if msg == WM_POWERBROADCAST:
+                # 挂起前必须来得及：调用方只做「非阻塞写 + 置标志」，别在这里
+                # 做枚举/读盘之类的耗时动作（系统在等这个返回值才肯睡眠）。
+                fn = self.power_handler
+                if fn is not None:
+                    try:
+                        fn(int(wparam or 0))
+                    except Exception as e:
+                        _trace("power_handler EXC %r" % e)
+                return 0      # 0 不等于 BROADCAST_QUERY_DENY，不会拦下挂起
             if msg == WM_COMMAND:
                 # wparam 低 16 位 = 菜单 ID，高 16 位 = 通知码。
                 # 别用 ctypes.cast（回调里 wparam 是普通 int，cast 会抛异常被吞，

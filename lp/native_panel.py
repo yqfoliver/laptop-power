@@ -55,6 +55,7 @@ DT_END_ELLIPSIS = 0x8000
 DT_NOPREFIX = 0x0800
 TRANSPARENT = 1
 PS_SOLID = 0
+PS_NULL = 5
 FW_NORMAL = 400
 FW_SEMIBOLD = 600
 FW_BOLD = 700
@@ -107,6 +108,9 @@ _u.CreateWindowExW.restype = wintypes.HWND
 _u.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
                                c_int, c_int, c_int, c_int, wintypes.HWND, wintypes.HMENU,
                                wintypes.HINSTANCE, c_void_p]
+# 不声明 argtypes 时 HWND 会按 c_int 传（32 位），64 位进程下是截断传参
+_u.DestroyWindow.argtypes = [wintypes.HWND]
+_u.DestroyWindow.restype = wintypes.BOOL
 _u.DefWindowProcW.restype = LRESULT
 _u.DefWindowProcW.argtypes = [wintypes.HWND, c_uint, c_void_p, c_void_p]
 _u.ShowWindow.argtypes = [wintypes.HWND, c_int]
@@ -147,6 +151,7 @@ ROOT_DIR = (os.path.dirname(os.path.abspath(sys.executable))
 # ---- gdi32
 for fn, rest, args in (
     ("CreateSolidBrush", wintypes.HBRUSH, [c_uint]),
+    ("CreatePen", wintypes.HPEN, [c_int, c_int, c_uint]),
     ("CreatePen", wintypes.HPEN, [c_int, c_int, c_uint]),
     ("SelectObject", c_void_p, [wintypes.HDC, c_void_p]),
     ("DeleteObject", wintypes.BOOL, [c_void_p]),
@@ -242,6 +247,7 @@ class NativePanel:
         self._fonts: dict = {}
         self._scale = 1.0
         self._brushes: dict = {}
+        self._pens: dict = {}
 
     # ------------------------------------------------------ 对外
     def show(self) -> bool:
@@ -507,15 +513,34 @@ class NativePanel:
             self._brushes[color] = b
         return b
 
+    def _pen(self, color=None):
+        """边框笔。默认 PS_NULL = 无边框。
+
+        别再用画刷去占画笔槽：`SelectObject(hdc, HBRUSH)` 会被 GDI 按**对象
+        类型**放进"画刷槽"（返回上一个画刷），画笔自始至终是 DC 默认的黑色
+        1px 笔 —— 于是每张卡片/进度条都被描了一圈黑边，注释里"同色笔=无边框"
+        从来没生效过。"""
+        key = color
+        p = self._pens.get(key)
+        if not p:
+            if color is None:
+                p = _g.CreatePen(PS_NULL, 0, 0)
+            else:
+                p = _g.CreatePen(PS_SOLID, 1, color)
+            self._pens[key] = p
+        return p
+
     def _fill(self, hdc, color, l, t, r, btm, radius=0):
         old_brush = _g.SelectObject(hdc, self._brush(color))
-        old_pen = _g.SelectObject(hdc, self._brush(color))   # 同色笔=无边框
-        if radius > 0:
-            _g.RoundRect(hdc, l, t, r, btm, radius, radius)
-        else:
-            _g.Rectangle(hdc, l, t, r, btm)
-        _g.SelectObject(hdc, old_pen)
-        _g.SelectObject(hdc, old_brush)
+        old_pen = _g.SelectObject(hdc, self._pen(None))     # PS_NULL：只填充不描边
+        try:
+            if radius > 0:
+                _g.RoundRect(hdc, l, t, r, btm, radius, radius)
+            else:
+                _g.Rectangle(hdc, l, t, r, btm)
+        finally:
+            _g.SelectObject(hdc, old_pen)
+            _g.SelectObject(hdc, old_brush)
 
     def _bar(self, hdc, color, l, t, r, btm, pct):
         pct = max(0.0, min(1.0, pct or 0))
@@ -549,6 +574,12 @@ class NativePanel:
         rc = RECT()
         _u.GetClientRect(hwnd, byref(rc))
         W, H = rc.right - rc.left, rc.bottom - rc.top
+        if W <= 0 or H <= 0:
+            # 最小化/尺寸为 0 时 CreateCompatibleBitmap 返回 NULL，后面
+            # SelectObject(None) + BitBlt 全是无效调用（还会把 _btns 算成负矩形，
+            # 之后点击命中判定跟着错位）。直接跳过这一帧。
+            _u.EndPaint(hwnd, byref(ps))
+            return
 
         mem = _g.CreateCompatibleDC(hdc)
         bmp = _g.CreateCompatibleBitmap(hdc, W, H)
@@ -749,7 +780,9 @@ class NativePanel:
             active = (cur_t == key)
             hover = (self._hover == "t:" + key)
             col = C_TEAL if key == "quiet" else (C_RED if key == "perf" else C_BLUE)
-            bg = col if active else (C_CARD_HI if hover else C_CARD_HI)
+            # 卡片底是 C_CARD，这三颗按钮常驻 C_CARD_HI；hover 再亮一档（C_TRACK）。
+            # 早前三元表达式两边都写 C_CARD_HI —— hover 永远无变化，像"点了没反应"。
+            bg = col if active else (C_TRACK if hover else C_CARD_HI)
             self._fill(hdc, bg, rect.left, rect.top, rect.right, rect.bottom, radius=S(7))
             self._text(hdc, ("✓ " + txt) if active else txt,
                        C_BG if active else C_TXT,
