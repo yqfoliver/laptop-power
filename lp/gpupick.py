@@ -230,9 +230,13 @@ class GpuPick:
         if self.reg is not None:
             return self.reg
         import winreg
-        return winreg.CreateKeyEx(
-            winreg.HKEY_CURRENT_USER, REG_PATH, 0,
-            winreg.KEY_READ | (winreg.KEY_WRITE if write else 0))
+        if write:
+            return winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, REG_PATH, 0,
+                winreg.KEY_READ | winreg.KEY_WRITE)
+        # 只读路径用 OpenKey：CreateKeyEx 会在「读一个值」时顺手把整个键建出来，
+        # 而这是用户自己都没配过的 DirectX 偏好键 —— 读操作不该有写副作用。
+        return winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_READ)
 
     def reg_get(self, exe_path: str) -> Optional[str]:
         if self.reg is not None:          # 测试通道：假注册表就是一个 dict

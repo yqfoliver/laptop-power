@@ -145,7 +145,10 @@ class Manager:
         # 散热/噪音策略：软件杠杆（CPU 上限/温度线）+ 硬件旋钮
         # （SYSCOOLPOL 散热方式 / PERFBOOSTMODE 睿频策略 / PERFEPP 能效偏好，
         #   经 powrprof 直写**自建计划**，系统「平衡」绝不碰）
-        self.thermal = ThermalPolicy(cfg)
+        # 接管前原值落盘：进程被强杀时内存里的原值会丢，下次启动会把
+        # 「我们自己写进去的静音档值」当成用户原值记下来（永久丢设置）
+        self.thermal = ThermalPolicy(
+            cfg, data_path=os.path.join(APP_ROOT, "thermal_saved.json"))
         self.thermal.scheme = cfg.get("custom_scheme") or None
         self._thermal_at = 0.0
         self._thermal_note = ""
@@ -1678,6 +1681,11 @@ class Manager:
         """
         cl = self.clamshell
         try:
+            # 上次没走完 reset()（崩溃/被强杀）：计划里可能还留着「合盖不动作」。
+            # 这条必须在开关判断**之前**跑 —— 用户可能已经把开关关掉了，
+            # 那样更没人来收尾。
+            if cl.recover_pending():
+                cl.recover()
             if not cl.enabled:
                 if cl.engaged:
                     cl.reset(reason="合盖不休眠已关闭，还原合盖动作")

@@ -2,6 +2,7 @@
 """散热策略 / ATKACPI 封装的离线回归测试（全部用假通道，绝不碰真电源计划）"""
 import os
 import sys
+import tempfile
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,11 +32,14 @@ class FakePP:
         self.written = []
         self.restored = []
         self.active_calls = 0
+        self.fail = set()          # 这些属性写入返回失败（模拟通道忙/被拒）
 
     def read_attr(self, scheme, attr, on_battery=False):
         return self.cur.get(attr)
 
     def write_range(self, scheme, attr, value, on_battery=False):
+        if attr in self.fail:
+            return False
         self.written.append((attr, value))
         self.cur[attr] = value
         return True
@@ -152,7 +156,72 @@ ok("空曲线文本", A.AtkAcpi.curve_text(None) == "—")
 ok("DEV 表关键项", A.DEV["perf_mode"] == 0x00120075 and A.DEV["cpu_temp"] == 0x00120094)
 ok("性能模式枚举", A.PERF_LABEL[2] == "静音" and A.PERF_LABEL[1] == "增强")
 
-print("== 9) 硬件旋钮范围保护（若 powrprof 可用） ==")
+print("== 9) 还原失败必须能重试（第六轮审查） ==")
+# 现场：静音档接管后切回 auto，其中一项写失败（通道忙）—— 那一项的原值留在
+# _hw_saved，而 _hw_applied 被清空。旧代码用「目标 == 已应用」提前返回，
+# 两个空集合相等 ⇒ 永久挡住重试，旋钮停在静音档的值上，界面却显示「自动」。
+q6, fake6 = make("quiet")
+q6.hw_apply(SCHEME)
+q6.set_mode("auto")
+fake6.fail = {"PERFEPP"}                 # 这一项先写不进去
+q6.hw_apply(SCHEME)
+ok("写失败的那项仍留在原值表", q6._hw_saved == {"PERFEPP": ORIG["PERFEPP"]},
+   str(q6._hw_saved))
+ok("失败时确实没还原", fake6.cur["PERFEPP"] != ORIG["PERFEPP"])
+fake6.fail = set()                       # 通道恢复
+q6.hw_apply(SCHEME)                      # 下一轮巡检（不会再有人手动点一次）
+ok("通道恢复后自动补还原", fake6.cur["PERFEPP"] == ORIG["PERFEPP"],
+   str(fake6.cur))
+ok("补还原后原值表清空", q6._hw_saved == {})
+ok("auto 且无可还原项时返回空串", q6.hw_apply(SCHEME) == "")
+
+print("== 10) 原值落盘：强杀后不能把静音值当原值 ==")
+# 现场：静音档接管 → 进程被强杀 → 计划里 knobs 还是静音值。重启后再接管，
+# 旧代码 read_attr 读到的是我们自己写的值，于是把它当「用户原值」记下来，
+# 用户真正的设置永久丢失（且全程无声）。
+_p1 = tempfile.mktemp(suffix=".json", prefix="lp_th_")
+q7 = T.ThermalPolicy({"thermal_mode": "quiet"}, data_path=_p1)
+fake7 = FakePP(ORIG)
+q7.pp = fake7
+q7.scheme = SCHEME
+q7.hw_apply(SCHEME)
+ok("接管时把原值落盘", os.path.isfile(_p1))
+q8 = T.ThermalPolicy({"thermal_mode": "quiet"}, data_path=_p1)
+fake8 = FakePP(fake7.cur)                 # 此时计划里全是静音档的值
+q8.pp = fake8
+q8.scheme = SCHEME
+q8.hw_apply(SCHEME)
+ok("新进程认领回真正的原值（不是静音值）", q8._hw_saved == ORIG, str(q8._hw_saved))
+q8.hw_restore()
+ok("还原到真正的原值", fake8.cur == ORIG, str(fake8.cur))
+ok("还原后原值表清空", q8._hw_saved == {})
+
+_p2 = tempfile.mktemp(suffix=".json", prefix="lp_th_")
+q9 = T.ThermalPolicy({"thermal_mode": "quiet"}, data_path=_p2)
+q9.pp = FakePP(ORIG)
+q9.scheme = SCHEME
+q9.hw_apply(SCHEME)
+q10 = T.ThermalPolicy({"thermal_mode": "auto"}, data_path=_p2)
+fake10 = FakePP(ORIG)
+q10.pp = fake10
+q10.hw_apply("99999999-0000-0000-0000-000000000000")   # 换过计划
+ok("计划 GUID 对不上就不认领旧原值（不拿别的计划的数去覆盖）",
+   fake10.written == [] and q10._hw_saved == {}, str(fake10.written))
+
+q11 = T.ThermalPolicy({"thermal_mode": "quiet"})       # 不给 data_path
+fake11 = FakePP(ORIG)
+q11.pp = fake11
+q11.scheme = SCHEME
+q11.hw_apply(SCHEME)
+ok("不传 data_path 时纯内存，不落盘",
+   q11._hw_saved == ORIG and fake11.cur != ORIG)
+for _p in (_p1, _p2):
+    try:
+        os.unlink(_p)
+    except Exception:
+        pass
+
+print("== 11) 硬件旋钮范围保护（若 powrprof 可用） ==")
 if T.pp.available():
     ok("越界 PROCTHROTTLEMAX 拒绝", T.pp.write_range(SCHEME, "PROCTHROTTLEMAX", 300) is False)
     ok("越界 PERFBOOSTMODE 拒绝", T.pp.write_range(SCHEME, "PERFBOOSTMODE", 9) is False)

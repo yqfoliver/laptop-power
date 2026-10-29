@@ -228,13 +228,6 @@ def top_cpu_procs(window: float = 4.0, top_n: int = 3) -> list:
         return out
 
     try:
-        if not hasattr(k32, "GetProcessTimes") or not k32.GetProcessTimes.restype:
-            k32.GetProcessTimes.restype = wintypes.BOOL
-            k32.GetProcessTimes.argtypes = [wintypes.HANDLE, POINTER(FILETIME),
-                                            POINTER(FILETIME), POINTER(FILETIME),
-                                            POINTER(FILETIME)]
-            k32.OpenProcess.restype = wintypes.HANDLE
-            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         idle0, kern0, user0 = FILETIME(), FILETIME(), FILETIME()
         if not k32.GetSystemTimes(byref(idle0), byref(kern0), byref(user0)):
             return []
@@ -359,6 +352,15 @@ class FILETIME(Structure):
 
 
 k32.GetSystemTimes.argtypes = [POINTER(FILETIME), POINTER(FILETIME), POINTER(FILETIME)]
+# GetProcessTimes 的签名必须在这里一次性钉死。早前这段配置写在 top_cpu_procs()
+# 内部，条件是 `not k32.GetProcessTimes.restype` —— 而 WinDLL 对未声明的函数
+# 默认 restype 就是 c_int（真值），条件恒为 False，配置**从来没执行过**。
+# 现在 64 位下靠 byref 传参侥幸能跑，但这种「看起来做了、其实没做」的代码
+# 一旦有人改成传整数句柄就会静默拿错值。
+k32.GetProcessTimes.restype = wintypes.BOOL
+k32.GetProcessTimes.argtypes = [wintypes.HANDLE, POINTER(FILETIME),
+                                POINTER(FILETIME), POINTER(FILETIME),
+                                POINTER(FILETIME)]
 k32.CreateFileW.restype = wintypes.HANDLE
 k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                             wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
@@ -551,6 +553,13 @@ class _LoadSampler:
         口径与磁盘兜底一致：持续 8 MB/s 折算为 100%，即 HEAVY_NET=60%
         约对应 4.8 MB/s 的持续下载（大文件/更新）。
         首次调用无基线返回 None；计数器回绕按 0 处理。
+
+        **elapsed 必须够长，否则不报数**：这里的分母是调用方给的间隔，早前写
+        `max(elapsed, 0.001)` 兜底 —— 首拍 load_sample 传的正是 0.0，于是几百
+        字节的增量被除以 1ms，放大成几个百分点；真有流量时直接顶到 100%。
+        而 algo.Ewma 的首个样本是**直接取原始值**当初始化的，一个假的 100%
+        网络占用会让「重负载」判定在启动后白白成立十几秒（风扇/档位跟着走）。
+        所以宁可返回 None（当作没有数据），也不报一个假数。
         """
         cur = net_bytes_total()
         prev, self._net = self._net, cur
@@ -559,7 +568,12 @@ class _LoadSampler:
         d = cur - prev
         if d <= 0:
             return 0.0                  # 32 位计数器回绕或无流量
-        elapsed = max(float(elapsed or 0.0), 0.001)
+        try:
+            elapsed = float(elapsed or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if elapsed < 0.5:               # 间隔太短：换算出的速率没有意义
+            return None
         mbps = d / elapsed / (1024.0 * 1024.0)
         return max(0.0, min(100.0, mbps / 8.0 * 100.0))
 

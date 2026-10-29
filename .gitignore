@@ -8,6 +8,8 @@ learn.json.bak
 learn.json.old
 battery_care.json
 clamshell.json
+thermal_saved.json
+thermal_saved.json.tmp
 hwprofile.json
 hwprofile.json.tmp
 gpupick.json

@@ -42,6 +42,8 @@ r"""散热 / 噪音策略 —— 「风扇调节」在软件层能做的全部
 """
 from __future__ import annotations
 
+import json
+import os
 from typing import Dict, Optional
 
 from . import powrprof as pp
@@ -94,7 +96,8 @@ class ThermalPolicy:
       atk_mode        ATK 性能模式目标（默认 None = 不干预）
     """
 
-    def __init__(self, cfg: Optional[Dict] = None, log=None):
+    def __init__(self, cfg: Optional[Dict] = None, log=None,
+                 data_path: Optional[str] = None):
         self.cfg = cfg if cfg is not None else {}
         self.log = log
         self.scheme: Optional[str] = None      # 由 manager 注入自建计划 GUID
@@ -105,9 +108,17 @@ class ThermalPolicy:
         self._hw_applied: Dict[str, int] = {}
         self._hw_err = ""
         self._atk_note = ""
+        # 接管前原值的落盘文件（可 None = 不持久化，测试用）
+        self.data_path = data_path
+        self._disk_scheme = ""
+        self._disk_saved: Dict[str, int] = {}
         # 硬件通道句柄（实例属性方便测试注入假通道；正常就是 lp.powrprof 模块）
         self.pp = pp
         self._load()
+        self._load_saved()
+        # 盘上的原值**不在这里直接采用**：构造时 manager 还没注入 scheme，
+        # 没法确认这份原值属于哪个计划。真正采用走 _adopt_disk_saved()，
+        # 在 hw_apply 里（那时 scheme 已就绪）。
 
     # ------------------------------------------------------------ 参数
     def _load(self) -> None:
@@ -151,6 +162,60 @@ class ThermalPolicy:
         else:
             self.atk_mode = None
 
+    # ------------------------------------------------------------ 原值持久化
+    def _load_saved(self) -> None:
+        """读「接管前原值」的落盘副本。
+
+        为什么必须落盘：进程被强杀/崩溃时内存里的 _hw_saved 直接消失，而计划
+        里的 SYSCOOLPOL/PERFBOOSTMODE/PERFEPP 还停在静音档的值上。下次启动
+        再接管时，read_attr 读到的是**我们写进去的值**，于是被当成「用户原值」
+        记下来 —— 用户原本的散热方式/睿频策略就永久丢了，且全过程无声无息。
+        """
+        self._disk_scheme = ""
+        self._disk_saved = {}
+        if not self.data_path or not os.path.isfile(self.data_path):
+            return
+        try:
+            with open(self.data_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                return
+            sv = d.get("saved")
+            if isinstance(sv, dict):
+                self._disk_saved = {k: int(v) for k, v in sv.items()
+                                    if k in ("SYSCOOLPOL", "PERFBOOSTMODE", "PERFEPP")}
+            self._disk_scheme = str(d.get("scheme") or "")
+        except Exception:
+            self._disk_saved = {}
+            self._disk_scheme = ""
+
+    def _persist_saved(self) -> None:
+        if not self.data_path:
+            return
+        # 内存里的「盘上副本」跟着一起更新：否则还原成功后 _hw_saved 空了，
+        # 下一轮 _adopt_disk_saved 又会把已经还原掉的旧值认领回来。
+        self._disk_saved = dict(self._hw_saved)
+        self._disk_scheme = self.scheme or ""
+        try:
+            tmp = self.data_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"scheme": self.scheme or "",
+                           "saved": dict(self._hw_saved)},
+                          f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.data_path)
+        except Exception:
+            pass
+
+    def _adopt_disk_saved(self) -> None:
+        """把盘上的原值认领为本进程的原值（只在内存里没有、且计划对得上时）。"""
+        if self._hw_saved or not self._disk_saved:
+            return
+        ds = (self._disk_scheme or "").strip().lower()
+        cur = str(self.scheme or "").strip().lower()
+        if ds and cur and ds != cur:
+            return                      # 换过计划：那份原值已经没意义了
+        self._hw_saved = dict(self._disk_saved)
+
     # ------------------------------------------------------------ 切换
     def set_mode(self, mode: str) -> bool:
         m = str(mode or "").lower()
@@ -184,12 +249,20 @@ class ThermalPolicy:
             self._hw_err = "powrprof 不可用，硬件旋钮跳过"
             return self._hw_err
 
+        self._adopt_disk_saved()     # 上次没收尾：先把真正的原值认领回来
         want = dict(self.hw_values)          # auto 时为 {} → 走还原分支
+        if not want:
+            # auto：把接管过的旋钮还原。**不能拿「目标==已应用」提前返回**：
+            # 上一次还原只要有一项写失败（通道忙/被拒），那一项的原值还留在
+            # _hw_saved 里，而 _hw_applied 已经被清空 —— 两者都是「空」，
+            # 于是永久挡住重试，旋钮停在静音档的值上，界面却显示「自动（未接管）」，
+            # 直到程序退出才由 main.py 的收尾再还原一次（那是几小时后）。
+            if self._hw_saved:
+                self.hw_restore()
+            self._hw_applied = {}
+            return ""
         # 目标与已应用一致 → 不重复写（主循环每 5 秒调一次）
         if want == self._hw_applied:
-            return ""
-        if not want:
-            self.hw_restore()
             return ""
 
         done = []
@@ -199,6 +272,7 @@ class ThermalPolicy:
                 continue
             if attr not in self._hw_saved:
                 self._hw_saved[attr] = cur          # 记下接管前的原值
+                self._persist_saved()               # 立刻落盘：此后崩溃也不丢原值
             if cur == val:
                 self._hw_applied[attr] = val
                 continue
@@ -246,6 +320,8 @@ class ThermalPolicy:
             if self.pp.write_range(self.scheme, attr, val):
                 changed = True
                 self._hw_saved.pop(attr, None)
+        if changed:
+            self._persist_saved()
         if changed and self._is_active():
             self.pp.set_active(self.scheme)
         self._hw_applied = {}

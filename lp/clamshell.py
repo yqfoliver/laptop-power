@@ -63,6 +63,7 @@ class ClamshellCtl:
         self.data_path = data_path
         self._saved: Optional[Dict[str, int]] = None     # {"ac": n, "dc": n}
         self._engaged = False
+        self._recover = False      # 上次运行死在「已接管」状态，需要收尾还原
         self._note = ""
         self._mon = 1
         self._load()
@@ -101,6 +102,11 @@ class ClamshellCtl:
                        if k in ("ac", "dc")}
                 if got:
                     self._saved = got
+                    # 盘上记着「上次是接管状态」= 进程没走完 reset()（崩溃/强杀/
+                    # 任务管理器结束）。_engaged 只在内存里，光靠它永远发现不了，
+                    # 结果是：计划里还是 LIDACTION=0、用户合盖机器不睡，而界面
+                    # 显示「合盖不休眠：未开启」—— 一个看不见的坏状态。
+                    self._recover = bool(d.get("engaged"))
         except Exception:
             pass
 
@@ -111,6 +117,7 @@ class ClamshellCtl:
             tmp = self.data_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"saved": self._saved or {},
+                           "engaged": bool(self._engaged),
                            "updated": __import__("time").strftime("%Y-%m-%d %H:%M:%S")},
                           f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.data_path)
@@ -173,6 +180,41 @@ class ClamshellCtl:
     def saved_action(self) -> Optional[Dict[str, int]]:
         return dict(self._saved) if self._saved else None
 
+    def recover_pending(self) -> bool:
+        """盘上记着「上次在接管状态就退出了」，还没收尾。"""
+        return bool(self._recover)
+
+    def recover(self, reason: str = "") -> bool:
+        """把上次遗留的「合盖不动作」还原回去（启动时调一次）。
+
+        _engaged 只在内存里，进程被强杀/崩溃就丢了；但计划里的 LIDACTION=0
+        是留在系统里的 ——         用户合上盖子机器不睡，界面却显示「未开启」。
+        这里以 clamshell.json 里持久化的 engaged 为准做一次收尾还原。
+        只对「确实有待收尾标记」的情况动手：_saved 在正常退出后也会留着
+        （下次接管还要用它做还原基准），不能拿它当「该还原了」的判据。
+        """
+        if not self._recover:
+            return False
+        self._recover = False
+        if not self._saved or not self.scheme or not pp.available():
+            return False
+        ok = 0
+        for key, ac in (("ac", False), ("dc", True)):
+            v = self._saved.get(key)
+            if v is None:
+                continue
+            try:
+                if pp.set_lid_action(self.scheme, int(v), ac):
+                    ok += 1
+            except Exception:
+                pass
+        if not ok:
+            return False
+        self._engaged = False
+        self._note = reason or "还原上次未正常退出时遗留的合盖动作"
+        self._persist()
+        return True
+
     # ------------------------------------------------------------ 主循环
     def tick(self, on_ac: bool, scheme_active: bool) -> Optional[str]:
         """返回本次发生的动作描述（None = 什么都没做）。幂等。"""
@@ -204,6 +246,7 @@ class ClamshellCtl:
             except Exception:
                 pass
             self._engaged = True
+            self._persist()          # 记下「现在是接管状态」，供崩溃后收尾
             self._note = ("蛤壳模式：外接显示器 + %s，合盖不睡眠"
                           % ("已接电源" if on_ac else "允许电池"))
             return self._note
@@ -232,7 +275,10 @@ class ClamshellCtl:
                     pp.set_active(self.scheme)
                 except Exception:
                     pass
+        was_engaged = self._engaged
         self._engaged = False
+        if was_engaged:
+            self._persist()          # 「已退出接管」也要落盘，否则下次会误还原
         if reason:
             self._note = reason
         return changed
