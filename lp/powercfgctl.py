@@ -126,8 +126,9 @@ def parse_query(text: str) -> PowerPlan:
     cur_group_alias = ""
     cur = None                      # 当前 PowerSetting
     cur_name = ""
+    lines = text.splitlines()
 
-    for raw in text.splitlines():
+    for _i, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             continue
@@ -153,7 +154,6 @@ def parse_query(text: str) -> PowerPlan:
             cur = PowerSetting(cur_group, cur_group_alias, guid, None, name)
             plan.settings[guid.upper()] = cur
             cur_name = name
-            m2 = _ALIAS_RE.search(text[text.find(line):])  # 占位，后面统一扫
             continue
 
         # 别名紧跟在 GUID 行/子组行后面
@@ -184,16 +184,20 @@ def parse_query(text: str) -> PowerPlan:
 
         if line.startswith("可能的设置索引") and cur is not None:
             try:
-                idx = int(line.split(":")[-1].strip())
+                idx = int(line.rsplit(":", 1)[-1].strip())
             except ValueError:
-                idx = -1
-            nxt = ""
-            for nxt in text.splitlines()[text.splitlines().index(raw) + 1:]:
+                continue
+            # 友好名称紧跟在索引行后面，直接看下一行。
+            #
+            # 旧实现用 `text.splitlines().index(raw)` 定位「当前这一行」——
+            # 文件里有几十行一模一样的「可能的设置索引: 0」，index() 永远返回
+            # **第一个**匹配，于是每个设置的档位名都被挂到了第一个设置头上
+            # （2026-10-29 实测：「系统散热方式」的档位名解析成「最小值/低」，
+            # 那是「最小处理器状态」的）。用 enumerate 的下标天然不会指错。
+            for nxt in lines[_i + 1:_i + 3]:
                 nxt = nxt.strip()
                 if nxt.startswith("可能的设置友好名称"):
                     cur.options[idx] = nxt.split(":", 1)[-1].strip()
-                    break
-                if nxt.startswith("可能的设置索引") or not nxt:
                     break
             continue
 

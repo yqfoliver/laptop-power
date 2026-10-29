@@ -178,7 +178,9 @@ def _set_reg(idx: int, name: str, on: bool):
     try:
         k = winreg.OpenKey(hive, path, 0, winreg.KEY_ALL_ACCESS)
     except Exception as e:
-        return False, "需要管理员" if "5" in str(e) or "拒绝" in str(e) else str(e)
+        # 判权限只认 winerror。旧写法 `"5" in str(e)` 是子串匹配：错误信息里
+        # 任何位置出现一个 5（路径、句柄号、中文编码）都会被误报成「需要管理员」。
+        return False, ("需要管理员" if getattr(e, "winerror", 0) == 5 else str(e))
     try:
         try:
             v, t = winreg.QueryValueEx(k, name)
@@ -221,14 +223,27 @@ def set_startup(sid: str, on: bool) -> dict:
         kind, rest = sid.split(":", 1)
     except Exception:
         return {"ok": False, "msg": "非法 id"}
+    if kind not in ("reg", "dir", "task"):
+        return {"ok": False, "msg": "未知类型"}
+    # 必须与**当前扫描结果**对上才动手。
+    #
+    # 这条接口吃的是任意字符串，而 kind=dir/task 时 rest 就是绝对路径，
+    # `_set_file` 会直接给它改名 —— 等于暴露一个「改任意文件名」的原语。
+    # HTTP 服务虽然只绑 127.0.0.1，但网页可以跨站 POST 过来（见 webui 的
+    # Host/Origin 校验），两条防线都要有。顺带解决「拿着上一次快照里的
+    # 旧 id 反复点」（禁用后 id 会带前缀变化）导致的误操作。
+    try:
+        known = {it["id"] for it in startup_items()}
+    except Exception:
+        known = set()
+    if sid not in known:
+        return {"ok": False, "msg": "该项已变化，请刷新列表后重试"}
     try:
         if kind == "reg":
             idx_s, name = rest.split(":", 1)
             ok, msg = _set_reg(int(idx_s), name, on)
-        elif kind in ("dir", "task"):
-            ok, msg = _set_file(rest, on)
         else:
-            return {"ok": False, "msg": "未知类型"}
+            ok, msg = _set_file(rest, on)
     except Exception as e:
         return {"ok": False, "msg": str(e)}
     return {"ok": ok, "msg": msg}
@@ -273,8 +288,11 @@ def run_checks(mgr=None, deep: bool = False) -> dict:
     # 1) 启动项
     st = startup_items()
     n_on = sum(1 for x in st if x["enabled"])
+    # ok=None 只用在「确实没什么可说」的情形。旧实现不管几项都记 None，
+    # 于是这一项永远停在「中性」：分数被固定扣 3 分、摘要里的「待优化」
+    # 又只数 False 项 ⇒ 面板上既不算好也不算坏，还不给建议。
     add("startup", "开机启动项", "%d 项启用 / 共 %d 项" % (n_on, len(st)),
-        None if n_on else True,
+        n_on < 8,
         "" if n_on < 8 else "启动项偏多，拖慢开机、常驻后台也耗电，可在下面关掉不常用的")
 
     # 2) 内存 / 磁盘
@@ -308,33 +326,55 @@ def run_checks(mgr=None, deep: bool = False) -> dict:
         pass
 
     # 4) 程序自身状态（需要 manager）
+    #    每一项**单独**兜异常：旧实现整段一个 try，任何一项抛异常都会让后面
+    #    所有项永久消失（「电池健康」就因此从不出现、体检分数跟着虚高）。
+    #    单点故障不该连坐 —— 这是本项目反复踩到的一类 bug。
     if mgr is not None:
         try:
             s = mgr.status() or {}
-            add("plan", "当前电源计划", str(s.get("scheme_name") or s.get("scheme") or "—"),
-                True, "")
-            # status() 没有顶层 proc_max 键，它在 knobs.proc_max.value 里。
-            # 照旧写 s.get("proc_max") 恒为 None，这一项就永远不显示。
-            pm = ((s.get("knobs") or {}).get("proc_max") or {}).get("value")
-            if pm is not None:
-                add("proc_max", "CPU 最大状态", "%s%%" % pm,
-                    None if int(pm) < 100 else True,
-                    "" if int(pm) >= 100 else "正在限频（省电档/PD 弱电源时的正常现象）")
-            eco = (s.get("gpu_eco") or {}).get("eco") if isinstance(s.get("gpu_eco"), dict) else None
-            if eco is not None:
-                add("gpu_eco", "独显状态", "已断电（Eco）" if eco else "正常",
-                    None, "离电时断电可以省 3~5W")
-            # status()["battery"] 是**整数电量百分比**，不是字典 —— 对它调
-            # .get("health") 必然抛 AttributeError，被下面的 except 吞掉后
-            # 「电池健康」这一项从不出现（体检分数也跟着虚高）。
-            bt = s.get("battery_info") or {}
-            hp = bt.get("health_pct")
-            if hp:
-                hp = float(hp)
-                add("battery", "电池健康", "%.1f%%" % hp, hp >= 75,
-                    "" if hp >= 75 else "健康度偏低，续航会明显变短")
         except Exception:
-            pass
+            s = {}
+
+        def _item(fn):
+            try:
+                title, value, ok, advice = fn()
+            except Exception:
+                return                 # 这一项算不出来就跳过，不影响其它项
+            add(fn.__name__.lstrip("_"), title, value, ok, advice)
+
+        def plan():
+            return ("当前电源计划", str(s.get("scheme_name") or s.get("scheme") or "—"),
+                    True, "")
+
+        def proc_max():
+            # status() 没有顶层 proc_max 键，它在 knobs.proc_max.value 里。
+            pm = ((s.get("knobs") or {}).get("proc_max") or {}).get("value")
+            if pm is None:
+                raise ValueError("no proc_max")     # 拿不到就不显示（_item 会跳过）
+            pmv = int(float(pm))
+            return ("CPU 最大状态", "%s%%" % pmv, pmv >= 100,
+                    "" if pmv >= 100 else "正在限频（省电档/PD 弱电源时的正常现象）")
+
+        def gpu_eco():
+            g = s.get("gpu_eco")
+            eco = g.get("eco") if isinstance(g, dict) else None
+            if eco is None:
+                raise ValueError("no eco")
+            return ("独显状态", "已断电（Eco）" if eco else "正常", None,
+                    "离电时断电可以省 3~5W")
+
+        def battery():
+            # status()["battery"] 是**整数电量**，不是字典 —— 对它调 .get 必然抛
+            # AttributeError。健康度在 battery_info 里。
+            hp = (s.get("battery_info") or {}).get("health_pct")
+            if not hp:
+                raise ValueError("no health")
+            hp = float(hp)
+            return ("电池健康", "%.1f%%" % hp, hp >= 75,
+                    "" if hp >= 75 else "健康度偏低，续航会明显变短")
+
+        for fn in (plan, proc_max, gpu_eco, battery):
+            _item(fn)
 
     # 5) 后台吃电进程（可选，0.6s 采样）
     top = []

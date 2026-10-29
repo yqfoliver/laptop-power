@@ -43,6 +43,33 @@ def _free_port() -> int:
     return port
 
 
+# ---------------------------------------------------------------- 来源校验
+# 本服务只绑 127.0.0.1，但「只绑回环」并不等于「只有本机能调」：
+#   · 任意网页都能向 http://127.0.0.1:8753 发**跨站 POST**（text/plain 是
+#     「简单请求」，不触发预检），于是切档、改配置、启停启动项都能被外部页面
+#     驱动 —— 而 /api/startup_set 还带着「给任意文件改名」的能力；
+#   · DNS rebinding 更直接：attacker.com 解析到 127.0.0.1 后，浏览器认为
+#     它与攻击者页面**同源**，连响应都能读走（拿得到 /api/config、/api/status）。
+# 两道廉价防线：Host 必须是回环名（挡 rebinding），Origin/Referer 若存在也
+# 必须是回环（挡跨站 POST）。二者都不带的（curl、本地脚本）放行 —— 那是
+# 用户自己的工具，不是网页。
+LOOPBACK_NAMES = ("127.0.0.1", "localhost", "::1")
+
+
+def _hostname(value: str) -> str:
+    """从 Host / Origin / Referer 里取主机名（小写，去协议、端口、方括号、路径）"""
+    v = (value or "").strip().lower()
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    if v.startswith("["):                      # [::1]:8753
+        return v[1:].split("]", 1)[0]
+    return v.split("/", 1)[0].split(":", 1)[0]
+
+
+def _is_loopback(value: str) -> bool:
+    return _hostname(value) in LOOPBACK_NAMES
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "LaptopPower/1.0"
     protocol_version = "HTTP/1.1"
@@ -66,8 +93,26 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _local_ok(self) -> bool:
+        """请求是否来自本机（Host / Origin / Referer 三重判断，见模块顶部注释）"""
+        if not _is_loopback(self.headers.get("Host") or ""):
+            return False
+        origin = self.headers.get("Origin") or ""
+        if origin:
+            return _is_loopback(origin)        # file:// 的 "null" 也算非回环
+        ref = self.headers.get("Referer") or ""
+        if ref:
+            return _is_loopback(ref)
+        return True                            # 浏览器之外的调用（curl / 本地脚本）
+
+    def _forbidden(self):
+        self._send(403, b"forbidden: not a loopback request", "text/plain; charset=utf-8")
+
     def do_GET(self):
         path = urlparse(self.path).path
+        if not self._local_ok():
+            self._forbidden()
+            return
         # 哨兵：记录页面/接口访问，用于排查"标签页反复重载"问题。
         # 只记页面加载，不记 /api/ 轮询（每 2 秒三个请求，会把这个日志写成 GB 级）
         if not path.startswith("/api/"):
@@ -117,6 +162,11 @@ class Handler(BaseHTTPRequestHandler):
                 data = {}
         except Exception:
             data = {}
+        # 先把 body 读完再拒绝：HTTP/1.1 是长连接，留着未读的 body 会让
+        # 下一个请求从这里开始解析（表现为客户端莫名其妙收到 400）。
+        if not self._local_ok():
+            self._forbidden()
+            return
         try:
             self._api_post(path, data)
         except Exception as e:            # 任何参数错误都不该让连接悬空

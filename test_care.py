@@ -135,9 +135,23 @@ c.feed(batt(ac=True, charging=True, pct=60, rate=-30.0), 92.0, 60.0)
 ok(len(pc.writes()) == 1, "离开游戏档后恢复干预")
 
 print("== 8. 开关与切档还原 ==")
+# 两个开关各管一条触发线。旧实现把它们串成 `not A or not B`（AND 语义）：
+# 只关「充电高热降温」会把「插电高温保护」一起关掉 —— 开关名字承诺的事没做到。
+# 95℃ 插电充电：关掉充电高热那条，仍应由插电高温保护写 80%。
 c, pc = fresh({"care_heat_relief": False}, path=tmp_json())
 c.feed(batt(ac=True, charging=True, pct=60, rate=-30.0), 95.0, 60.0)
-ok(len(pc.writes()) == 0, "关闭降温开关后不写计划")
+ok(len(pc.writes()) == 1 and pc.writes()[0][-1] == "80",
+   "只关充电高热 -> 插电高温保护独立生效（写 80）", pc.writes())
+# 只关插电高温：90℃ 充电中应仍按充电高热写 70%
+c3, pc3 = fresh({"care_thermal_relief": False}, path=tmp_json())
+c3.feed(batt(ac=True, charging=True, pct=60, rate=-30.0), 90.0, 60.0)
+ok(len(pc3.writes()) == 1 and pc3.writes()[0][-1] == "70",
+   "只关插电高温 -> 充电高热独立生效（写 70）", pc3.writes())
+# 两个都关：一条线都不许动
+c4, pc4 = fresh({"care_heat_relief": False, "care_thermal_relief": False},
+                path=tmp_json())
+c4.feed(batt(ac=True, charging=True, pct=60, rate=-30.0), 99.0, 60.0)
+ok(len(pc4.writes()) == 0, "两个开关都关 -> 不写计划")
 c2, pc2 = fresh({}, path=tmp_json())
 c2.feed(batt(ac=True, charging=True, pct=60, rate=-30.0), 95.0, 60.0)
 c2.reset()

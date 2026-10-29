@@ -278,18 +278,24 @@ def sanitize(cfg: dict) -> list:
                 cfg[key] = default
                 fixed.append(key)
             continue
-        if not isinstance(default, (int, float)):
+        # 数值键有两个来源：默认值是数字，或者出现在 _NUM_LIMITS 里。
+        # 只看 `isinstance(default, (int, float))` 会漏掉**默认值为 None** 的那批
+        # （gpu_tgp_max_watts / dc_refresh_hz / pd_low_hz_value / power_envelope_watts
+        #  / gpu_temp_limit_c / gpupick_igpu_tier）—— 它们恰好全是喂判据的阈值：
+        # 面板 POST 一个 "gpu_tgp_max_watts": "abc" 就能绕过护栏，让分配器每拍在
+        # float() 处抛异常（被 except 吞掉 ⇒ 静默停摆），正是本函数存在的理由。
+        if not isinstance(default, (int, float)) and key not in _NUM_LIMITS:
             continue
         v = cfg.get(key)
         if v is None:
             if default is not None:
                 cfg[key] = default
                 fixed.append(key)
-            continue
+            continue                    # None 合法：自动探测 / 尚未测量
         try:
             v = int(v) if isinstance(default, int) else float(v)
         except (TypeError, ValueError):
-            cfg[key] = default
+            cfg[key] = default          # None 默认值的键在这里回到「未测量」
             fixed.append(key)
             continue
         lo_hi = _NUM_LIMITS.get(key)
@@ -602,7 +608,15 @@ def autostart_enabled() -> bool:
             pass
     try:
         d = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
-        return any("电源" in f or "Power" in f or "power" in f
-                   for f in os.listdir(d)) if os.path.isdir(d) else False
+        if not os.path.isdir(d):
+            return False
+        # 只认**本程序自己的**快捷方式。旧条件是 `"power" in f`（不区分大小写），
+        # 于是 PowerToys、powershell 脚本、别家「电源管理.lnk」统统算成「已开启」——
+        # 和 2026-10-08 那条「vbs 兜底把挂错的自启掩盖成已开启」是同一类假阳性。
+        for f in os.listdir(d):
+            low = f.lower()
+            if "laptoppower" in low or "笔记本电源自适应" in f:
+                return True
+        return False
     except Exception:
         return False

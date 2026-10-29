@@ -379,7 +379,10 @@ class Learner:
                 "dwell": dwell,
                 "pref": pref,
                 "pref_dir": d.get("pref_dir") or {},
-                "disabled": {m: list(v) for m, v in (d.get("disabled") or {}).items()},
+                # 新格式是 {knob: 停用时戳}，旧存档是 [knob]。直接 list(v) 会把
+                # 时间戳当成旋钮名报出去（面板/CLI 显示「已停用 1759…」）。
+                "disabled": {m: (sorted(v) if isinstance(v, dict) else list(v))
+                             for m, v in (d.get("disabled") or {}).items()},
                 "confirm": dict(d.get("confirm") or {}),
                 "history": list(d.get("history") or [])[-20:],
                 "habit": self.habit_hint(ac),

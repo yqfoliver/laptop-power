@@ -642,13 +642,16 @@ def _log_boot(reason: str) -> None:
 
     放在最早期，比 exit.log 的「启动」行更早 —— exit.log 那行在单实例判定和
     Manager 构造之后才写，进程若在那之前退出就完全查不到痕迹。
+
+    走 logtrim：这两个日志以前是裸 `open(..., "a")` 无限追加，跑几个月能到几 MB
+    （boot/exit 每个启动+退出各留好行，电源事件异常时还会连写）。
     """
     try:
         from lp import config as _cfg
-        with open(os.path.join(_cfg.APP_ROOT, "boot.log"), "a",
-                  encoding="utf-8") as f:
-            f.write("%s  pid=%d  %s\n" % (time.strftime("%F %T"),
-                                          os.getpid(), reason))
+        from lp import logtrim
+        logtrim.log_line(os.path.join(_cfg.APP_ROOT, "boot.log"),
+                         "%s  pid=%d  %s" % (time.strftime("%F %T"),
+                                             os.getpid(), reason))
     except Exception:
         pass
 
@@ -659,9 +662,9 @@ def _log_exit(reason: str) -> None:
     所以消息泵的每个出口都留一行时间戳。"""
     try:
         from lp import config as _cfg        # config 是 main() 里的局部导入名
-        with open(os.path.join(_cfg.APP_ROOT, "exit.log"), "a",
-                  encoding="utf-8") as f:
-            f.write("%s  %s\n" % (time.strftime("%F %T"), reason))
+        from lp import logtrim
+        logtrim.log_line(os.path.join(_cfg.APP_ROOT, "exit.log"),
+                         "%s  %s" % (time.strftime("%F %T"), reason))
     except Exception:
         pass
 

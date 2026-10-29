@@ -352,13 +352,26 @@ class BatteryCare:
 
     # ------------------------------------------------------------ 缓解动作
     def _read_ac_proc_max(self) -> Optional[int]:
-        """读「当前交流电源设置索引」。
+        """读「当前交流电源设置索引」（PROCTHROTTLEMAX 的 AC 值）。
 
         **必须只认「当前交流电源设置索引」这一行**：powercfg /q 的输出里
         还夹着「最小/最大可能的设置」「可能的设置增量」三个 0x 数值，
         早前按 `vals[0]` 取值读到的是「最小可能的设置 = 0」，
         会让降温逻辑把 AC CPU 上限误写成 0%（机器卡死级故障）。
         """
+        # ① 快路径：powrprof 进程内读（微秒级，且**与系统语言无关**）。
+        #    下面的 powercfg 文本解析只认中文「当前交流电源设置索引」——
+        #    英文/日文 Windows 上永远读不到值，于是「充电高热降温」这条保护
+        #    静默失效（不报错、不写日志，用户只会觉得机器越来越烫）。
+        try:
+            sch = self.scheme_guid or pc.active_scheme()
+            if sch:
+                v = pc.live_value(sch, GUID_SUB_PROC, GUID_THROTTLE_MAX, False)
+                if v is not None and 0 <= int(v) <= 100:
+                    return int(v)
+        except Exception:
+            pass
+        # ② 兜底：powercfg 文本（powrprof 被安全软件拦掉时）
         try:
             out = pc.run_powercfg(["/q", "SCHEME_CURRENT", GUID_SUB_PROC,
                                    GUID_THROTTLE_MAX])
@@ -375,17 +388,38 @@ class BatteryCare:
     def _write_ac_proc_max(self, val: int) -> bool:
         """写 AC CPU 上限。**只在自建计划处于活动状态时才允许写**
         （硬性约束：系统自带计划一个字节不改）。写入极少发生（仅状态切换），
-        所以这里强制走一次实时校验，不吃 30 s 缓存。"""
+        所以这里强制走一次实时校验，不吃 30 s 缓存。
+
+        返回 True **必须回读确认**：这个返回值决定「还原基线要不要销毁」。
+        写失败却报成功 = 原值被丢掉、CPU 永久留在降压档
+        （2026-10-28 审查出的 anti-pattern，PROCTHROTTLEMAX 已经踩过一次）。
+        """
         if not self._scheme_ok(force=True):
             return False
+        v = max(0, min(100, int(val)))
+        # ① 快路径：powrprof 写 + 回读
         try:
-            v = max(0, min(100, int(val)))
+            sch = self.scheme_guid or pc.active_scheme()
+            if sch and pc.write_fast(sch, "PROCTHROTTLEMAX", v, False):
+                try:
+                    pc.set_active(sch)          # 写索引后激活一次才生效
+                except Exception:
+                    pass
+                got = pc.live_value(sch, GUID_SUB_PROC, GUID_THROTTLE_MAX, False)
+                if got is not None:
+                    return int(got) == v
+                return True                     # 写成功、读不到 → 默认相信写
+        except Exception:
+            pass
+        # ② 兜底：powercfg
+        try:
             pc.run_powercfg(["/setacvalueindex", "SCHEME_CURRENT",
                              GUID_SUB_PROC, GUID_THROTTLE_MAX, str(v)])
             pc.run_powercfg(["/setactive", "SCHEME_CURRENT"])
-            return True
         except Exception:
             return False
+        got = self._read_ac_proc_max()
+        return got is None or int(got) == v
 
     def _scheme_ok(self, force: bool = False) -> bool:
         """当前活动电源计划是不是我们的自建计划？（30 s 缓存，避免频繁起子进程）"""
@@ -419,7 +453,11 @@ class BatteryCare:
           2) 插电高温：插电（含已充满）且 ≥ hot_cpu_c（默认 95℃）→ 压到 80%
         滞回：触发后分别等到 ≤ relief_clear_c(82) / ≤ thermal_clear_c(89) 才解除。
         """
-        if not self.relief_enabled or not self.thermal_relief \
+        # 两个开关**各管各的**触发线。
+        # 旧实现写成 `not relief_enabled or not thermal_relief` —— 一个 AND，
+        # 于是把「插电高温保护」关掉会连带关掉「充电高热降温」：开关名字承诺
+        # 的事没做到，界面上也没有任何提示（关掉 A 却是 B 不工作）。
+        if not (self.relief_enabled or self.thermal_relief) \
                 or not self.charging_allowed(batt):
             self.relief_off(reason="当前不适合做降温动作")
             return
@@ -432,10 +470,12 @@ class BatteryCare:
             return
         heat = float(heat_c)
         # 已触发中的种类用「清除阈值」做滞回，未触发的用「进入阈值」
-        want_charge = (charging and heat >= (self.relief_clear_c
-                                             if self._relief_charge else self.hot_charge_c))
-        want_thermal = heat >= (self.thermal_clear_c
-                                if self._relief_thermal else self.hot_cpu_c)
+        want_charge = bool(self.relief_enabled and charging
+                           and heat >= (self.relief_clear_c
+                                        if self._relief_charge else self.hot_charge_c))
+        want_thermal = bool(self.thermal_relief
+                            and heat >= (self.thermal_clear_c
+                                         if self._relief_thermal else self.hot_cpu_c))
 
         if not self._relief_on:
             if not (want_charge or want_thermal):

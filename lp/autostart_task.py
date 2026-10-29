@@ -100,7 +100,11 @@ def write_xml():
         return None
     p = xml_path()
     try:
-        xml = _TPL.format(cmd=exe, cwd=os.path.dirname(exe))
+        # 必须做 XML 转义：路径里带 & < >（例如 "C:\Tools & Games\..."）会让
+        # 这份 XML 非法，schtasks /create /xml 直接失败 —— 而失败是静默的
+        # （只写 boot.log），表现就是「自启又没生效」却查不出原因。
+        from xml.sax.saxutils import escape
+        xml = _TPL.format(cmd=escape(exe), cwd=escape(os.path.dirname(exe)))
         with open(p, "wb") as f:
             f.write(b"\xff\xfe")
             f.write(xml.encode("utf-16-le"))
