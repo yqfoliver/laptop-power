@@ -317,6 +317,17 @@ def _friendly(scheme: str, sub: Optional[str], setting: Optional[str] = None) ->
         return ""
 
 
+def scheme_name(scheme: str) -> str:
+    """电源计划的友好名（PowerReadFriendlyName，进程内无子进程）。
+
+    给状态/面板显示用：取不到（API 不可用、GUID 未知）返回空串，
+    由调用方决定退回值 —— 不要在这里兜底成 GUID。
+    """
+    if not scheme:
+        return ""
+    return _friendly(scheme, None)
+
+
 def subgroups(scheme: str) -> List[Tuple[str, str]]:
     return [(x, _friendly(scheme, x)) for x in _enumerate(scheme, None, ACCESS_SUBGROUP)]
 

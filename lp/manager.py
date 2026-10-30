@@ -49,6 +49,34 @@ def fmt_minutes(m) -> str:
     return "%d 小时 %02d 分" % (m // 60, m % 60)
 
 
+# 知名系统计划 GUID（Windows 固定值）。友好名读不到时的显示兜底 ——
+# 办公（balanced）档的设计就是切回系统平衡计划，面板会经常处在这个
+# GUID 上，绝不能把裸 GUID 直接抛给用户。
+_WELLKNOWN_SCHEMES = {
+    "381b4222-f694-41f0-9685-ff5bb260df2e": "平衡（系统默认）",
+    "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c": "高性能（系统自带）",
+    "a1841308-3541-4fab-bc81-f71556f20b4a": "节能（系统自带）",
+}
+
+
+def scheme_label(scheme: str, custom_scheme: str = "", custom_name: str = "",
+                 friendly=None) -> str:
+    """激活计划的显示名：自建计划 → 配置名；其它 → Windows 友好名 →
+    知名 GUID 固定名 → 裸 GUID（最后手段）。"""
+    if not scheme:
+        return ""
+    if custom_scheme and scheme == custom_scheme:
+        return custom_name or "笔记本自适应电源"
+    if friendly:
+        try:
+            n = friendly(scheme)
+        except Exception:
+            n = ""
+        if n:
+            return n
+    return _WELLKNOWN_SCHEMES.get(scheme.lower(), scheme)
+
+
 class Manager:
     def __init__(self, cfg: dict, on_change: Optional[Callable[[dict], None]] = None,
                  on_notify: Optional[Callable[[str, str], None]] = None):
@@ -730,7 +758,11 @@ class Manager:
             "foreground": fg.get("process", ""),
             "title": fg.get("title", ""),
             "scheme": scheme,
-            "scheme_name": self.cfg.get("custom_scheme") == scheme and self.cfg.get("custom_scheme_name") or "",
+            # getattr：测试会用别的模块整体替身 pc，替身未必有 scheme_name
+            "scheme_name": scheme_label(
+                scheme or "", self.cfg.get("custom_scheme") or "",
+                self.cfg.get("custom_scheme_name") or "",
+                getattr(pc, "scheme_name", None)),
             "nvml_ready": self.nvml.ready,
             "nvml_mode": self.nvml.mode(),
             "knobs": knobs,
