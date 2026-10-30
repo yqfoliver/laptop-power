@@ -897,8 +897,11 @@ function renderCheckup(){
   });
 }
 
-async function runCheckup(){
+/* expand=false 是启动自动那一轮：只把分数备好，不替用户把卡片撑开，
+   失败也不弹回执（用户没点过，别拿红字吓人）。 */
+async function runCheckup(expand){
   if(ckBusy) return;                        // 双击「体检」不该叠两个请求
+  const manual = expand !== false;
   ckBusy = true;
   ckMsg = "";
   renderCheckup();
@@ -906,10 +909,12 @@ async function runCheckup(){
     const d = await get("/api/checkup");
     if(d && d.error) throw new Error(d.error);
     ckData = d;
-    ckOpen = true;                          // 结果出来就摊开，省用户一次点击
+    if(manual) ckOpen = true;               // 手动点：结果出来就摊开，省一次点击
   }catch(e){
-    ckMsg = "体检失败：" + ((e && e.message) || e);
-    ckMsgUntil = Date.now() + 8000;
+    if(manual){
+      ckMsg = "体检失败：" + ((e && e.message) || e);
+      ckMsgUntil = Date.now() + 8000;
+    }
   }finally{
     ckBusy = false;
     renderCheckup();
@@ -993,10 +998,15 @@ function ckTick(){
   if(ckMsg && Date.now() >= ckMsgUntil) renderCheckup();
 }
 
-document.getElementById("ckRun").onclick  = runCheckup;
+document.getElementById("ckRun").onclick  = function(){ return runCheckup(true); };
 document.getElementById("ckFix").onclick  = ckFixAll;
 document.getElementById("ckMore").onclick = function(){ ckOpen = !ckOpen; renderCheckup(); };
 renderCheckup();
+
+/* 启动后自动体检一次：分数和「一键优化」先备好，卡片仍收起不占地。
+   只跑这一轮 —— 之后靠「重新体检」，绝不进 2 秒轮询（体检要扫注册表和
+   进程，每两秒跑一次既费 CPU 又会和用户抢列表重建）。 */
+runCheckup(false);
 
 tick();
 setInterval(tick, 2000);
