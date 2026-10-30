@@ -112,9 +112,41 @@ class Learner:
                         merged[k] = v
                     else:
                         merged[k] = v
+                self._migrate_modes(merged)
                 self.data = merged
         except Exception:
             pass
+
+    # 2026-10-30 档位合并：办公吸收「平衡」、续航吸收「省电」。旧学习数据
+    # 里的规则/票仓/停留统计原地改名 —— 不迁移的话，一条旧的 balanced 规则
+    # 会把已合并掉的档位悄悄复活（判定明明给了 office，规则又改回去）。
+    _MERGED_MODES = {"balanced": "office", "saver": "battery"}
+
+    def _migrate_modes(self, d: dict) -> None:
+        try:
+            for r in (d.get("rules") or {}).values():
+                if isinstance(r, dict) and r.get("mode") in self._MERGED_MODES:
+                    r["mode"] = self._MERGED_MODES[r["mode"]]
+            for p in (d.get("procs") or {}).values():
+                v = p.get("votes")
+                if isinstance(v, dict):
+                    for old, new in self._MERGED_MODES.items():
+                        if old in v:
+                            v[new] = int(v.get(new, 0) or 0) + int(v.pop(old) or 0)
+            dw = d.get("dwell")
+            if isinstance(dw, dict):
+                for old, new in self._MERGED_MODES.items():
+                    if old in dw:
+                        a, b = dw.pop(old), dw.get(new)
+                        if isinstance(a, dict) and isinstance(b, dict):
+                            for k2, v2 in a.items():
+                                b[k2] = b.get(k2, 0) + v2 if isinstance(v2, (int, float)) else v2
+                        elif isinstance(a, (int, float)):
+                            dw[new] = (b if isinstance(b, (int, float)) else 0) + a
+                        else:
+                            dw[new] = a
+        except Exception:
+            pass                    # 迁移失败不挡启动，坏数据下次保存时自然修正
 
     def save(self, force: bool = False) -> None:
         with self._lock:

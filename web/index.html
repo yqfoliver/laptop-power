@@ -43,8 +43,8 @@
   .hero .autoTag{float:right;font-size:10.5px;font-weight:600;cursor:pointer;user-select:none}  .hero .desc{font-size:10.5px;color:var(--muted);margin-top:2px}
   .hero .esaverNote{font-size:10.5px;color:var(--amber);margin-top:4px;line-height:1.45}
 
-  /* 五个档位一行排布，省掉一整行高度 */
-  .modes{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}
+  /* 三个档位一行排布（2026-10-30 五并三：平衡并入办公、省电并入续航） */
+  .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
   button.mode{border:1px solid var(--border);background:var(--card);border-radius:6px;
         padding:6px 2px;cursor:pointer;transition:.12s;font-family:inherit;
         color:var(--text);text-align:center;line-height:1.15}
@@ -151,6 +151,11 @@
     <span class="autoTag" id="autoTag" title="点击开启 / 关闭自动判定">自动判定</span>
     <div class="mode" id="mode">—</div>
     <div class="desc" id="reason"></div>
+    <div class="row" style="margin:4px 0 0">
+      <div class="lbar"><i id="loadBar" style="width:0%"></i></div>
+      <span class="load-pct" id="loadPct">0%</span>
+    </div>
+    <div class="hint" id="loadDetail" style="margin-top:2px">— · CPU — · 磁盘 — · 网络 — · 独显 —</div>
     <div class="esaverNote" id="esaverNote" hidden>⚡ 系统节能模式接管 CPU 限频 · 工具暂让位（卡顿来自系统节能）</div>
   </div>
 
@@ -219,17 +224,6 @@
 
   <div class="cols">
   <div class="col">
-  <div class="card" id="loadCard">
-    <div class="ct"><span class="t">负载状态</span><span class="r" id="loadState">—</span></div>
-    <div class="row">
-      <div class="lbar"><i id="loadBar" style="width:0%"></i></div>
-      <span class="load-pct" id="loadPct">0%</span>
-    </div>
-    <div class="hint" id="loadDetail">CPU — · 磁盘 — · 网络 — · 独显 —</div>
-  </div>
-  </div>
-
-  <div class="col">
   <div class="card" id="gpCard">
     <div class="ct"><span class="t">核显优先</span><span class="r" id="gpVerdict" style="color:var(--muted)">—</span></div>
     <div class="hint" id="gpLine">—</div>
@@ -265,9 +259,9 @@ const MODES = [
   {k:"gaming",   ico:"🎮", lb:"游戏"},
   {k:"office",   ico:"📄", lb:"办公"},
   {k:"battery",  ico:"🌱", lb:"续航"},
-  {k:"saver",    ico:"🪫", lb:"省电"},
-  {k:"balanced", ico:"⚖️", lb:"平衡"},
 ];
+/* 旧档位名（saver/balanced）仍被后端接受：老配置、学习数据、命令行参数
+   里都有 —— 但界面上不再出现，判定也不会再产出它们。 */
 
 let state = {};
 
@@ -526,10 +520,7 @@ async function chgSet(act){
 
 function renderLoad(){
   const L = state.load||{};
-  const el = document.getElementById("loadState");
   const st = L.state||"未知";
-  el.textContent = st + (L.heavy?" · 已保护":"");
-  el.className = "r" + (L.heavy?" warn":"");
   const b = Math.max(0, Math.min(100, state.busy||0));
   const bar = document.getElementById("loadBar");
   bar.style.width = b + "%";
@@ -539,10 +530,14 @@ function renderLoad(){
   // 独显已断电时「独显 —」是纯噪音（功耗卡里已经写着「已断电」）
   const GE = state.gpu_eco||{};
   const gpuOff = (GE.mode === "eco") || (GE.mode == null && GE.eco === 1);
-  const segs = ["CPU " + f(L.cpu), "磁盘 " + f(L.disk), "网络 " + f(L.net)];
+  // 2026-10-30 负载状态卡并入头部：档位状态名放进明细行开头
+  const segs = [st + (L.heavy?" · 已保护":""),
+                "CPU " + f(L.cpu), "磁盘 " + f(L.disk), "网络 " + f(L.net)];
   if(!gpuOff) segs.push("独显 " + f(L.gpu));
   if(state.cooldown_left>0) segs.push("冷却 " + state.cooldown_left + "s");
-  document.getElementById("loadDetail").textContent = segs.join(" · ");
+  const det = document.getElementById("loadDetail");
+  det.textContent = segs.join(" · ");
+  det.style.color = L.heavy ? "var(--amber)" : "";
 }
 
 // 切换失败的回执（临时占用右上角那格：那里本来显示「华硕性能模式」，

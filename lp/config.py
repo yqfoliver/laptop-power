@@ -82,7 +82,7 @@ DEFAULT_CONFIG = {
     # ---------------- 离电续航（2026-10-04 新增） ----------------
     # 离电时独显通常休眠，剩下的耗电大头只有两个：SoC（CPU+核显）与屏幕。
     # 所以离电策略围绕这两件事做；**机器不同，收益也不同**，别照搬任何数字。
-    "battery_saver_percent": 15,      # 拔电且低于此电量：进「极限续航」档
+    # 注：battery_saver_percent 随「省电」档并入续航一起退场（2026-10-30）
     "refresh_on_battery": True,       # 拔电时降低屏幕刷新率
     # 拔电用的刷新率：None=自动挑「本机真实存在的、比当前低的最高档」
     # （绝不硬写面板不支持的频率 —— 那会黑屏；60Hz 屏的机器自动得到 None=不改）
@@ -286,7 +286,6 @@ _NUM_LIMITS = {
     "dc_brightness_cap": (0, 100),
     "idle_dim_level": (0, 100),
     "idle_dim_after_s": (5, 3600),
-    "battery_saver_percent": (0, 100),
     "auto_game_gpu_pct": (0, 100),
     "panel_font_scale": (0.5, 2.5),
     "gpupick_igpu_tier": (1, 3),
@@ -401,8 +400,10 @@ def _migrate(cfg: dict) -> None:
     # 来自旧版本默认值，不是用户选择）
     # 2026-10-30：low_battery_percent / minimize_to_tray / battery_eco_percent
     # 三个键全项目没有任何读取点（面板却能改、改了什么都不发生）⇒ 一并退场。
+    # battery_saver_percent 同日退场：「省电」档并入续航，判定不再读它。
     for dead in ("manual", "pd_s4_gpu_off", "low_battery_percent",
-                 "minimize_to_tray", "battery_eco_percent"):
+                 "minimize_to_tray", "battery_eco_percent",
+                 "battery_saver_percent"):
         if dead in cfg and dead not in DEFAULT_CONFIG:
             cfg.pop(dead, None)
 

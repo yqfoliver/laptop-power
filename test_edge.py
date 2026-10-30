@@ -261,6 +261,24 @@ ok(rep["disabled"].get("gaming") == ["PROCTHROTTLEMAX"],
 lr.data["disabled"] = {"quiet": ["PERFEPP"]}
 ok(lr.report()["disabled"].get("quiet") == ["PERFEPP"], "旧格式（list）仍兼容")
 
+# 2026-10-30 档位合并：旧学习数据里的 balanced/saver 必须原地改名，
+# 否则旧规则会把已合并掉的档位悄悄复活（判定给 office，规则又改回去）。
+lr2 = learner.Learner(path=tempfile.mktemp(suffix=".json"))
+lr2.data["rules"] = {
+    "code.exe": {"mode": "balanced", "conf": 3, "ac": True, "t": 0},
+    "game.exe": {"mode": "saver", "conf": 3, "ac": False, "t": 0},
+    "keep.exe": {"mode": "gaming", "conf": 3, "ac": True, "t": 0},
+}
+lr2.data["procs"] = {"a.exe": {"votes": {"balanced": 2, "office": 1}}}
+lr2.data["dwell"] = {"balanced": 100, "saver": {"ac": 5}}
+lr2._migrate_modes(lr2.data)
+ok(lr2.data["rules"]["code.exe"]["mode"] == "office", "旧 balanced 规则 → office")
+ok(lr2.data["rules"]["game.exe"]["mode"] == "battery", "旧 saver 规则 → battery")
+ok(lr2.data["rules"]["keep.exe"]["mode"] == "gaming", "未涉及档位不动")
+ok(lr2.data["procs"]["a.exe"]["votes"] == {"office": 3}, "票仓并档计数不丢")
+ok(lr2.data["dwell"].get("balanced") is None and
+   lr2.data["dwell"].get("saver") is None, "停留统计的旧键清掉")
+
 # ---------------------------------------------------------------- 8. 任务 XML
 print("== 8. autostart_task：路径里的 & 必须转义 ==")
 tmp_root = tempfile.mkdtemp(prefix="lppa_task_")

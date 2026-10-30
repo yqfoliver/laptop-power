@@ -335,7 +335,8 @@ class Manager:
         summary 为 algo.LoadTracker 的负载摘要（可为 None，退化为纯场景判定）。
         fg 为调用方采好的前台窗口信息（不传则现采一次；主循环每轮只采一次，
         避免 5 秒内多次 GetForegroundWindow 结果互相矛盾）。
-        判定顺序： 游戏 → 办公 → 拔电续航 → 平衡，中间插一层「重负载保护」。
+        判定顺序： 游戏 → 拔电续航 → 办公（2026-10-30 起「平衡/省电」两档
+        并入办公/续航，判定不再产出它们；内部还原机制保留 balanced 不动）。
         """
         if fg is None:
             fg = hw.foreground()
@@ -397,17 +398,13 @@ class Manager:
         heavy = bool(summary and summary.get("heavy"))
 
         pct = st.get("battery_percent")
-        # 注：原 battery_eco_percent（低电量进续航档）已删除 —— 离电一律续航档
-        # 是更严格的规则，完全覆盖它。删除而不是留着，是因为「配置项在、改了
-        # 没反应」比「没有这个配置」更容易误导（2026-10-30 清理）。
-        saver_pct = int(self.cfg.get("battery_saver_percent", 15))
+        # 注：battery_saver_percent（低电量进「省电」档）随档位合并一起退场
+        #（2026-10-30）—— 离电一律续航档，省电档只比续航档多压一点参数，
+        # 用户分不清也用不上；极限场景由 PD 弱电源封顶兜底。
 
         if is_game:
             # 游戏档不再分低电量档：离电也走游戏档（写入项本身就有 DC 版参数）
             target = "gaming"
-        elif (not on_ac) and pct is not None and pct <= saver_pct:
-            # 电量告急：除了打游戏，其余一律先保电量（亮度/CPU/刷新率全压到底）
-            target = "saver"
         elif not on_ac:
             # 离电铁律：除游戏外一律续航档（办公/重负载也不例外——
             # 重负载想全速可以插电，或手动锁定档位）
@@ -418,15 +415,18 @@ class Manager:
         elif is_office:
             target = "office"
         else:
-            target = "balanced"
+            # 2026-10-30：「平衡」并入办公 —— 插电的默认状态就是办公档的
+            # 温和参数（proc 5~100%、亮度 75），不再有「系统平衡」这个
+            # 独立档；回到系统计划的还原路径（退出/托盘）保留在内部。
+            target = "office"
 
         # 自学习：这个程序以前被你安排过别的档位，照你的来
         if self.cfg.get("learn_enabled", True) and fexe:
             r = self.learner.rule_for(fexe, on_ac)
             if r and r in PROFILES and r != target:
-                # 游戏/极限省电优先级最高，学习结果不覆盖；
+                # 游戏优先级最高，学习结果不覆盖；
                 # 离电时学习结果若是耗电档（office/balanced）也压回续航
-                if is_game or target == "saver":
+                if is_game:
                     pass
                 elif not on_ac and r != "gaming":
                     target = "battery"
