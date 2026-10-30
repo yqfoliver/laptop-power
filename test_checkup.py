@@ -109,9 +109,18 @@ def main():
 
     items2 = {x["name"]: x for x in checkup.startup_items()}
     ck(items2["Alpha"]["enabled"] is False, "重新扫描：Alpha 已显示为关闭")
+    # 面板靠返回的新 id 就地更新按钮（不整表重拉）。这条 id 必须与重新扫描
+    # 出来的完全一致，否则「关掉 → 再点开」会撞白名单，界面上就是点了没反应。
+    ck(r.get("id") == items2["Alpha"]["id"],
+       "返回的新 id 与重新扫描到的一致（%r vs %r）"
+       % (r.get("id"), items2["Alpha"]["id"]))
+    ck(r.get("enabled") is False, "返回操作后的状态")
+    ck(r.get("name") == "Alpha", "返回原显示名")
 
     r = checkup.set_startup(items2["Alpha"]["id"], True)
     ck(r["ok"] is True, "重新启用成功（%s）" % r.get("msg"))
+    ck(r.get("id") == by["Alpha"]["id"] and r.get("enabled") is True,
+       "启用后返回的 id 还原成无前缀形式（%r / %r）" % (r.get("id"), r.get("enabled")))
     ck(_key_values().get("Alpha") == r"C:\a.exe", "启用后值名/数据还原")
 
     r = checkup.set_startup(by["Gamma"]["id"], False)     # Gamma 本来就是禁用的
@@ -133,7 +142,10 @@ def main():
        "快捷方式恢复原名")
 
     # ---------------------------------------------------------------- 非法输入
-    ck(checkup.set_startup("", True)["ok"] is False, "空 id 被拒绝")
+    bad = checkup.set_startup("", True)
+    ck(bad["ok"] is False, "空 id 被拒绝")
+    ck("id" in bad and "enabled" in bad and "name" in bad,
+       "失败时也带全 id/enabled/name（%s）" % sorted(bad))
     ck(checkup.set_startup("nonsense", True)["ok"] is False, "非法 id 被拒绝")
     ck(checkup.set_startup("reg:99:x", True)["ok"] is False, "越界索引不崩")
     ck(checkup.set_startup("dir:" + os.path.join(tmp, "ghost.lnk"), True)["ok"] is False,

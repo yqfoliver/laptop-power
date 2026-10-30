@@ -60,15 +60,27 @@ function mkEl(id) {
     get() { return el._html; },
     set(v) {
       el._html = String(v || "");
-      // 只解析本页面用到的形态：<button class="mode" data-k="...">
+      // 只把 <button> 解析成元素（页面靠它们绑事件），div/span 只当文本存着。
+      // 属性解析是通用的：class / id / 任意 data-*（转成 dataset 驼峰键）。
       el.children = [];
-      const re = /<button[^>]*class="([^"]*)"[^>]*data-k="([^"]*)"/g;
+      const re = /<button([^>]*)>([\s\S]*?)<\/button>/g;
       let m;
       while ((m = re.exec(el._html))) {
+        const at = m[1];
         const b = mkEl("");
         b.tagName = "BUTTON";
-        b.className = m[1];
-        b.dataset.k = m[2];
+        const cm = /class="([^"]*)"/.exec(at);
+        if (cm) b.className = cm[1];
+        const im = /id="([^"]*)"/.exec(at);
+        if (im) b.id = im[1];
+        const dre = /data-([a-z-]+)="([^"]*)"/g;
+        let dm;
+        while ((dm = dre.exec(at))) {
+          const key = dm[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+          b.dataset[key] = dm[2];
+        }
+        // 按钮文字（剥掉内层 span 之类）
+        b.textContent = m[2].replace(/<[^>]*>/g, "").trim();
         el.children.push(b);
       }
     },
@@ -77,8 +89,12 @@ function mkEl(id) {
     get() { return el.children.length ? el.children[0] : null; },
   });
   el.querySelectorAll = function (sel) {
-    if (sel === ".mode") return el.children.filter((c) => c._cls.has("mode"));
-    return [];
+    if (sel.charAt(0) === ".") {
+      const c = sel.slice(1);
+      return el.children.filter((x) => x._cls.has(c));
+    }
+    const want = sel.toUpperCase();
+    return el.children.filter((x) => x.tagName === want);
   };
   el.querySelector = function () { return null; };
   el.getBoundingClientRect = function () {
@@ -180,6 +196,15 @@ const epilogue = `
   tick: tick,
   chgSet: chgSet,
   fmtDur: fmtDur,
+  renderCheckup: renderCheckup,
+  runCheckup: runCheckup,
+  ckToggle: ckToggle,
+  ckTick: ckTick,
+  esc: esc,
+  ckState: function(){ return {data: ckData, open: ckOpen, msg: ckMsg, busy: ckBusy}; },
+  ckReset: function(){
+    ckData = null; ckOpen = false; ckMsg = ""; ckMsgUntil = 0; ckBusy = false;
+  },
 };`;
 const fn = new Function(
   "window", "document", "fetch", "setTimeout", "setInterval", "location", "console",
@@ -372,8 +397,129 @@ function next3() {
   }).then(() => {
     ok(!/未连接/.test(el("fg").textContent), "恢复后提示消失（自愈）", el("fg").textContent);
     ok(el("fg").style.color === "", "颜色复位", el("fg").style.color);
-    next4();
-  }).catch((e) => { ok(false, "断连测试抛异常：" + e); next4(); });
+    nextCk();
+  }).catch((e) => { ok(false, "断连测试抛异常：" + e); nextCk(); });
+}
+
+/* ------------------------------------------------------------ 12. 系统体检 */
+function ckPayload() {
+  return {
+    score: 64, ms: 24.8,
+    items: [
+      { key: "startup", title: "开机启动项", value: "19 项启用 / 共 19 项",
+        ok: false, advice: "启动项偏多，拖慢开机" },
+      { key: "mem", title: "内存", value: "16.7 / 31.1 GB（46%）", ok: true, advice: "" },
+      { key: "gpu_eco", title: "独显状态", value: "正常", ok: null, advice: "离电时断电可以省 3~5W" },
+    ],
+    startups: [
+      { id: "reg:0:Steam", name: "Steam", cmd: "C:\\Steam.exe", where: "HKCU\\Run",
+        enabled: true, kind: "reg", need_admin: false, self: false },
+      { id: "reg:0:LaptopPowerAuto", name: "LaptopPowerAuto", cmd: "C:\\lp.exe",
+        where: "HKCU\\Run", enabled: true, kind: "reg", need_admin: false, self: true },
+      { id: "dir:C:\\x\\off.lnk.lppa_disabled", name: "off.lnk",
+        cmd: "C:\\x\\off.lnk.lppa_disabled", where: "启动(用户)", enabled: false,
+        kind: "dir", need_admin: false, self: false },
+    ],
+  };
+}
+
+function nextCk() {
+  console.log("\n== 12. 系统体检：按需拉取 + 启动项开关 ==");
+  T.ckReset();
+  T.renderCheckup();
+
+  ok(typeof el("ckRun").onclick === "function", "「体检」按钮有 onclick");
+  ok(typeof el("ckMore").onclick === "function", "「展开」按钮有 onclick");
+  ok(el("ckBody").hidden === true, "还没体检时不展开");
+  ok(el("ckMore").style.display === "none", "还没体检时不显示「展开」");
+  ok(el("ckScore").textContent === "—", "分数位显示 —", el("ckScore").textContent);
+
+  net.calls.length = 0;
+  net.payload = basePayload({ __routes: { "/api/checkup": ckPayload() } });
+  return Promise.resolve(el("ckRun").onclick()).then(() => {
+    ok(net.calls.some((c) => c.url === "/api/checkup"), "点「体检」→ GET /api/checkup",
+       net.calls.map((c) => c.url));
+
+    ok(el("ckScore").textContent === "64 分 · 1 项待优化", "分数与待优化项数",
+       el("ckScore").textContent);
+    ok(el("ckBody").hidden === false, "结果出来自动展开");
+    ok(/2\/3/.test(el("ckLine").textContent), "摘要写明启动项开关数",
+       el("ckLine").textContent);
+    ok(/ckdot bad/.test(el("ckItems")._html), "不达标项用红点");
+    ok(/ckdot mid/.test(el("ckItems")._html), "中性项（ok=null）用黄点");
+    ok(/启动项偏多/.test(el("ckItems")._html), "建议行一并渲染");
+
+    const list = el("ckList");
+    ok(list.children.length === 3, "启动项按钮逐条生成", list.children.length);
+    ok(list.children.every((b) => typeof b.onclick === "function"), "每个开关都绑了 onclick");
+    ok(list.children[0].dataset.sid === "reg:0:Steam", "按钮带上真实 id",
+       list.children[0].dataset.sid);
+    ok(list.children[0].textContent === "关", "启用项显示「关」", list.children[0].textContent);
+    ok(list.children[2].textContent === "开", "停用项显示「开」", list.children[2].textContent);
+    ok(/本程序/.test(list._html), "自己那条标了「本程序」（免得误关后以为坏了）");
+    ok(/lppa_disabled/.test(list.children[2].dataset.sid), "停用项的 id 带后缀");
+
+    /* --- 点「关」：发 POST，且只改这一条，不整表重拉 --- */
+    net.calls.length = 0;
+    net.payload = basePayload({ __routes: {
+      "/api/startup_set": { ok: true, msg: "ok", id: "reg:0:lppa_disabled_Steam",
+                            enabled: false, name: "Steam" },
+    } });
+    return Promise.resolve(list.children[0].onclick()).then(() => {
+      const c = net.calls.filter((x) => x.url === "/api/startup_set")[0];
+      ok(!!c, "点开关 → POST /api/startup_set", net.calls.map((x) => x.url));
+      ok(c && JSON.parse(c.opt.body).id === "reg:0:Steam", "带上原 id");
+      ok(c && JSON.parse(c.opt.body).on === false, "启用项 → on=false（点下去是关掉）");
+      ok(net.calls.filter((x) => x.url === "/api/checkup").length === 0,
+         "操作后不重拉整表（重拉会重建 19 行，连点第二个开关时会撞上）");
+
+      const b0 = el("ckList").children[0];
+      ok(b0.dataset.sid === "reg:0:lppa_disabled_Steam",
+         "按钮 id 换成后端返回的新 id（否则再点会撞白名单）", b0.dataset.sid);
+      ok(b0.textContent === "开", "按钮翻转成「开」", b0.textContent);
+      ok(/已停用 Steam/.test(el("ckLine").textContent), "回执如实写进摘要行",
+         el("ckLine").textContent);
+
+      /* --- 失败必须说真话 --- */
+      net.payload = basePayload({ __routes: {
+        "/api/startup_set": { ok: false, msg: "需要管理员",
+                              id: "reg:0:LaptopPowerAuto", enabled: true,
+                              name: "LaptopPowerAuto" },
+      } });
+      return Promise.resolve(el("ckList").children[1].onclick());
+    }).then(() => {
+      ok(/需要管理员/.test(el("ckLine").textContent), "失败原因原样显示（不能吞）",
+         el("ckLine").textContent);
+      ok(el("ckList").children[1].textContent === "关", "失败时按钮状态不翻转",
+         el("ckList").children[1].textContent);
+
+      /* --- 回执到期要让位 --- */
+      clock.off = 12000;
+      T.ckTick();
+      ok(!/需要管理员/.test(el("ckLine").textContent), "回执到期自动让位",
+         el("ckLine").textContent);
+      clock.off = 0;
+
+      /* --- 收起不动列表 --- */
+      const keep = el("ckList").children[0];
+      el("ckMore").onclick();
+      ok(el("ckBody").hidden === true, "点「收起」隐藏列表");
+      ok(el("ckList").children[0] === keep, "收起时不动列表（不重建元素）");
+      el("ckMore").onclick();
+      ok(el("ckBody").hidden === false, "再点「展开」恢复");
+
+      /* --- 轮询不许碰体检卡 --- */
+      net.payload = basePayload();
+      const keep2 = el("ckList").children[0];
+      const scoreBefore = el("ckScore").textContent;
+      return T.tick().then(() => {
+        ok(el("ckList").children[0] === keep2, "2 秒轮询不重建启动项列表");
+        ok(el("ckScore").textContent === scoreBefore, "轮询不改体检分数（快照不该自己变）",
+           el("ckScore").textContent);
+        next4();
+      });
+    });
+  }).catch((e) => { ok(false, "体检测试抛异常：" + (e && e.stack || e)); next4(); });
 }
 
 /* ------------------------------------------------------------ 11. 静态一致性 */

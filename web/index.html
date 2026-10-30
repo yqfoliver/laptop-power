@@ -82,6 +82,27 @@
     border-radius:5px;padding:5px 4px;font-size:10.5px;cursor:pointer;font-family:inherit;flex:1}
   button.btn:hover{border-color:#4A5568}
   button.btn.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.btn:disabled{opacity:.45;cursor:default}
+  button.btn:disabled:hover{border-color:var(--border)}
+
+  /* 系统体检：紧凑行式列表。启动项可能十几条，列表内部滚动，
+     不把面板撑成一根长条（高度自适应会把窗口拉得很高）。 */
+  .ckrow{display:flex;align-items:center;gap:6px;font-size:10.5px;padding:1.5px 0;line-height:1.3}
+  .ckdot{display:block;width:6px;height:6px;border-radius:3px;flex:none;background:var(--track)}
+  .ckdot.on{background:var(--green)}
+  .ckdot.bad{background:var(--red)}
+  .ckdot.mid{background:var(--amber)}
+  .cknm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ckvl{flex:none;max-width:48%;color:var(--muted);text-align:right;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+        font-variant-numeric:tabular-nums}
+  .ckad{font-size:10px;color:var(--amber);padding:0 0 2px 12px;line-height:1.35}
+  .cksep{height:1px;background:var(--border);margin:7px 0 5px}
+  .cklist{max-height:168px;overflow-y:auto;overscroll-behavior:contain;margin-top:3px}
+  button.ckt{flex:none;border:1px solid var(--border);background:var(--card2);color:var(--text);
+    border-radius:4px;padding:1px 7px;font-size:10px;cursor:pointer;font-family:inherit;min-width:29px}
+  button.ckt:hover{border-color:#4A5568}
+  button.ckt.off{color:var(--muted);background:transparent}
 </style>
 <script>
 /* ============ 多标签互斥：同一时刻只留一个面板标签，重复的自动关闭 ============ */
@@ -222,6 +243,21 @@
       <button class="btn" id="gpDgpu">用独显</button>
       <button class="btn" id="gpAuto">交回系统</button>
       <button class="btn" id="gpProbe">试试核显</button>
+    </div>
+  </div>
+
+  <div class="card" id="ckCard">
+    <div class="ct"><span class="t">系统体检</span><span class="r" id="ckScore" style="color:var(--muted)">—</span></div>
+    <div class="hint" id="ckLine">点「体检」检查系统状态与开机启动项</div>
+    <div class="fanbtns">
+      <button class="btn" id="ckRun">体检</button>
+      <button class="btn" id="ckMore">展开</button>
+    </div>
+    <div id="ckBody" hidden>
+      <div id="ckItems"></div>
+      <div class="cksep"></div>
+      <div class="hint" id="ckStartNote"></div>
+      <div class="cklist" id="ckList"></div>
     </div>
   </div>
 </div>
@@ -638,7 +674,7 @@ async function tick(){
   ticking = true;
   try{
     await tickOnce();
-  }finally{ ticking = false; }
+  }finally{ ticking = false; ckTick(); }
 }
 async function tickOnce(){
   let s;
@@ -759,6 +795,165 @@ document.getElementById("gpProbe").onclick = async ()=>{
   tick();
 };
 
+/* ================= 系统体检（按需拉取，不进 2 秒轮询）=================
+   为什么不让它进 /api/status：体检要枚举三处 Run 键、「启动」文件夹和全部
+   计划任务 XML，每 2 秒跑一次纯属耗电。它只在用户点「体检」时拉一次。
+   也正因为如此，render() 不调 renderCheckup()：由轮询重绘启动项列表会在
+   用户按下开关的那一瞬把整行换掉 —— 「轮询重建吃掉点击」这个坑本项目已经
+   踩过（模式按钮、chgSet）。体检分数是快照，2 秒刷一次也没有意义。 */
+let ckData = null, ckOpen = false, ckMsg = "", ckMsgUntil = 0, ckBusy = false;
+
+// 启动项名字与命令行来自注册表/文件系统，可能含 < > & 和引号。直接拼进
+// innerHTML 会破坏结构（甚至注入），一律转义。
+function esc(s){
+  return String(s==null?"":s).replace(/[&<>"']/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+
+function ckColor(s){
+  if(s==null) return "var(--muted)";
+  return s>=90 ? "var(--green)" : s>=70 ? "var(--amber)" : "var(--red)";
+}
+
+function renderCheckup(){
+  if(ckMsg && Date.now() >= ckMsgUntil) ckMsg = "";   // 到期即失效，别一直挂着
+  const sc = document.getElementById("ckScore");
+  const line = document.getElementById("ckLine");
+  const body = document.getElementById("ckBody");
+  const run = document.getElementById("ckRun");
+  const more = document.getElementById("ckMore");
+  if(!sc || !line || !body) return;
+
+  run.textContent = ckBusy ? "检查中…" : (ckData ? "重新体检" : "体检");
+  run.disabled = ckBusy;
+
+  if(!ckData){
+    sc.textContent = "—";
+    sc.style.color = "var(--muted)";
+    line.textContent = ckMsg || "点「体检」检查系统状态与开机启动项";
+    line.style.color = ckMsg ? "var(--amber)" : "";
+    body.hidden = true;
+    more.style.display = "none";
+    return;
+  }
+
+  const items = ckData.items || [];
+  const starts = ckData.startups || [];
+  const bad = items.filter(function(x){ return x.ok === false; }).length;
+  const openOn = starts.filter(function(x){ return x.enabled; }).length;
+
+  sc.textContent = (ckData.score==null ? "—" : ckData.score) + " 分" +
+                   (bad ? " · " + bad + " 项待优化" : "");
+  sc.style.color = ckColor(ckData.score);
+
+  if(ckMsg){
+    line.textContent = ckMsg;
+    line.style.color = "var(--amber)";     // 操作回执：与常规摘要区分开
+  }else{
+    line.textContent = "用时 " + Math.round(ckData.ms || 0) + " ms · 开机启动 " +
+                       openOn + "/" + starts.length + " 项开启";
+    line.style.color = "";
+  }
+
+  more.style.display = "";
+  more.textContent = ckOpen ? "收起" : "展开";
+  body.hidden = !ckOpen;
+  if(!ckOpen) return;                       // 收起时不动列表，避免无谓重建
+
+  let h = "";
+  items.forEach(function(it){
+    const c = it.ok === true ? "on" : (it.ok === false ? "bad" : "mid");
+    h += '<div class="ckrow"><i class="ckdot ' + c + '"></i>' +
+         '<span class="cknm">' + esc(it.title) + "</span>" +
+         '<span class="ckvl">' + esc(it.value) + "</span></div>";
+    if(it.advice) h += '<div class="ckad">' + esc(it.advice) + "</div>";
+  });
+  document.getElementById("ckItems").innerHTML = h;
+
+  document.getElementById("ckStartNote").textContent =
+    "开机启动 " + starts.length + " 条 · 「关」只是改名停用，随时能恢复";
+
+  let b = "";
+  starts.forEach(function(s){
+    b += '<div class="ckrow"><span class="cknm">' + esc(s.name) +
+         (s.self ? ' <span style="color:var(--accent)">本程序</span>' : "") +
+         '</span><span class="ckvl">' + esc(s.where) + "</span>" +
+         '<button class="ckt' + (s.enabled ? "" : " off") +
+         '" data-sid="' + esc(s.id) + '" data-on="' + (s.enabled ? "0" : "1") +
+         '">' + (s.enabled ? "关" : "开") + "</button></div>";
+  });
+  const list = document.getElementById("ckList");
+  list.innerHTML = b;
+  // data-on 是「点下去之后会变成的状态」：当前启用 → 点它 = 关掉。
+  // 每个按钮单独绑，测试里能直接断言 onclick 是函数（本项目硬性要求）。
+  list.querySelectorAll(".ckt").forEach(function(btn){
+    btn.onclick = function(){ return ckToggle(btn.dataset.sid, btn.dataset.on === "1"); };
+  });
+}
+
+async function runCheckup(){
+  if(ckBusy) return;                        // 双击「体检」不该叠两个请求
+  ckBusy = true;
+  ckMsg = "";
+  renderCheckup();
+  try{
+    const d = await get("/api/checkup");
+    if(d && d.error) throw new Error(d.error);
+    ckData = d;
+    ckOpen = true;                          // 结果出来就摊开，省用户一次点击
+  }catch(e){
+    ckMsg = "体检失败：" + ((e && e.message) || e);
+    ckMsgUntil = Date.now() + 8000;
+  }finally{
+    ckBusy = false;
+    renderCheckup();
+  }
+}
+
+async function ckToggle(sid, on){
+  if(ckBusy) return;
+  ckBusy = true;
+  renderCheckup();
+  try{
+    const r = await post("/api/startup_set", {id: sid, on: !!on});
+    if(r && r.ok){
+      ckMsg = (r.msg === "already")
+        ? ("「" + (r.name || "该项") + "」本来就是这个状态")
+        : ((on ? "已启用 " : "已停用 ") + (r.name || "该项"));
+      ckMsgUntil = Date.now() + 8000;
+      // 只改本地这一条记录，重绘时自然带上新 id/新状态。不整表重拉：
+      // 启停会改 id（前缀/后缀），拿旧 id 再点会撞白名单 —— 后端把新 id
+      // 一起返回了，接着用就行。
+      const s = (ckData.startups || []).filter(function(x){ return x.id === sid; })[0];
+      if(s){
+        s.enabled = (r.enabled != null) ? !!r.enabled : !!on;
+        if(r.id) s.id = r.id;
+      }
+    }else{
+      // 后端拒绝必须说真话：「需要管理员」是最常见的原因，不能吞掉
+      ckMsg = "没改成：" + ((r && r.msg) || "未知原因");
+      ckMsgUntil = Date.now() + 10000;
+    }
+  }catch(e){
+    ckMsg = "请求失败：" + ((e && e.message) || e);
+    ckMsgUntil = Date.now() + 10000;
+  }finally{
+    ckBusy = false;
+    renderCheckup();
+  }
+}
+
+/* 回执到期后要让位（不重绘的话「已停用 Steam」会一直挂着，像刚发生）
+   只在真的过期那一刻重绘一次，平时零开销。 */
+function ckTick(){
+  if(ckMsg && Date.now() >= ckMsgUntil) renderCheckup();
+}
+
+document.getElementById("ckRun").onclick  = runCheckup;
+document.getElementById("ckMore").onclick = function(){ ckOpen = !ckOpen; renderCheckup(); };
+renderCheckup();
+
 tick();
 setInterval(tick, 2000);
 
@@ -818,6 +1013,10 @@ if(location.search.indexOf("probe")>=0){
       " scroll=" + (document.documentElement.scrollHeight > window.innerHeight ? "YES" : "no");
   }, 3500);
 }
+
+/* ?ck：打开就直接跑一次体检并展开（人工核对/截图用；正常打开不受影响，
+   体检仍然只在点按钮时发生） */
+if(location.search.indexOf("ck")>=0) setTimeout(runCheckup, 250);
 </script>
 </body>
 </html>

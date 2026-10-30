@@ -217,14 +217,41 @@ def _set_file(path: str, on: bool):
         return False, ("需要管理员" if getattr(e, "winerror", 0) in (5, 13) else str(e))
 
 
+def _new_id(sid: str, on: bool) -> str:
+    """启停之后这条记录的新 id。
+
+    改名式启停会改变 id 本身（注册表值名加/去前缀、文件加/去后缀）。
+    前端若拿旧 id 再点一次，白名单校验会判它「已变化，请刷新」——
+    在界面上看就是「点了没反应」。所以把新 id 一并返回，让面板就地更新。
+    """
+    try:
+        kind, rest = sid.split(":", 1)
+        if kind == "reg":
+            idx_s, name = rest.split(":", 1)
+            off = name.startswith(DISABLE_PREFIX)
+            base = name[len(DISABLE_PREFIX):] if off else name
+            return "reg:%s:%s" % (idx_s, base if on else DISABLE_PREFIX + base)
+        if kind in ("dir", "task"):
+            off = rest.endswith(DISABLE_SUFFIX)
+            base = rest[:-len(DISABLE_SUFFIX)] if off else rest
+            return "%s:%s" % (kind, base if on else base + DISABLE_SUFFIX)
+    except Exception:
+        pass
+    return sid
+
+
 def set_startup(sid: str, on: bool) -> dict:
-    """启用/禁用一条启动项。返回 {ok, msg}"""
+    """启用/禁用一条启动项。返回 {ok, msg, id, enabled, name}
+
+    id/enabled 是**操作后**的取值（失败时原样返回旧值），面板用它们就地
+    更新按钮，不必整表重拉 —— 重拉会在用户连点第二个开关时把列表整个换掉。
+    """
     try:
         kind, rest = sid.split(":", 1)
     except Exception:
-        return {"ok": False, "msg": "非法 id"}
+        return {"ok": False, "msg": "非法 id", "id": sid, "enabled": None, "name": ""}
     if kind not in ("reg", "dir", "task"):
-        return {"ok": False, "msg": "未知类型"}
+        return {"ok": False, "msg": "未知类型", "id": sid, "enabled": None, "name": ""}
     # 必须与**当前扫描结果**对上才动手。
     #
     # 这条接口吃的是任意字符串，而 kind=dir/task 时 rest 就是绝对路径，
@@ -233,11 +260,13 @@ def set_startup(sid: str, on: bool) -> dict:
     # Host/Origin 校验），两条防线都要有。顺带解决「拿着上一次快照里的
     # 旧 id 反复点」（禁用后 id 会带前缀变化）导致的误操作。
     try:
-        known = {it["id"] for it in startup_items()}
+        known = {it["id"]: it for it in startup_items()}
     except Exception:
-        known = set()
-    if sid not in known:
-        return {"ok": False, "msg": "该项已变化，请刷新列表后重试"}
+        known = {}
+    item = known.get(sid)
+    if item is None:
+        return {"ok": False, "msg": "该项已变化，请刷新列表后重试",
+                "id": sid, "enabled": None, "name": ""}
     try:
         if kind == "reg":
             idx_s, name = rest.split(":", 1)
@@ -245,8 +274,13 @@ def set_startup(sid: str, on: bool) -> dict:
         else:
             ok, msg = _set_file(rest, on)
     except Exception as e:
-        return {"ok": False, "msg": str(e)}
-    return {"ok": ok, "msg": msg}
+        return {"ok": False, "msg": str(e), "id": sid,
+                "enabled": item.get("enabled"), "name": item.get("name", "")}
+    return {"ok": ok, "msg": msg,
+            "id": _new_id(sid, on) if ok else sid,
+            # 失败时如实返回原状态：前端若照着 on 翻转，界面会跟注册表对不上
+            "enabled": bool(on) if ok else item.get("enabled"),
+            "name": item.get("name", "")}
 
 
 # ------------------------------------------------------------------ 体检项
