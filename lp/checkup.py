@@ -352,7 +352,7 @@ def run_checks(mgr=None, deep: bool = False) -> dict:
         hags = gs.get("hags")
         if hags is None:
             add("hags", "硬件加速 GPU 调度", "系统默认", None,
-                "Win11 24H2 起支持的显卡默认开启；点「一键优化」可确保显式打开")
+                "Win11 24H2 起支持的显卡默认开启，一般无需更改")
         else:
             add("hags", "硬件加速 GPU 调度",
                 "开" if hags else "关", bool(hags),
