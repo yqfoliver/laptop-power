@@ -157,6 +157,9 @@ const net = {
     },
     alloc: {}, thermal: {}, fan: {}, gpu_eco: {}, pd: {}, load: {},
     gpupick: { enabled: true, current: {} },
+    // 页面加载会自动体检一轮 —— 初值必须给得出数据。给不足的话这轮永远失败，
+    // 后面「自动体检已备好分数」的断言就成了空转（夹具漂移的老坑）。
+    __routes: { "/api/checkup": ckPayload() },
   },
   fail: false, calls: [],
 };
@@ -451,7 +454,22 @@ function ckFixedPayload() {
 }
 
 function nextCk() {
-  console.log("\n== 12. 系统体检：按需拉取 + 启动项开关 ==");
+  console.log("\n== 12. 系统体检：启动自动跑一轮 + 按需重跑 + 启动项开关 ==");
+
+  /* --- 启动自动那轮：数据已备好、卡片不摊开、只跑一次 --- */
+  const st0 = T.ckState();
+  ok(st0.data !== null, "页面加载后自动体检过一次（ckData 已有数据）");
+  ok(el("ckBody").hidden === true, "自动体检不替用户把卡片撑开");
+  ok(el("ckRun").textContent === "重新体检", "按钮直接显示「重新体检」",
+     el("ckRun").textContent);
+  ok(/64 分/.test(el("ckScore").textContent), "分数已备好",
+     el("ckScore").textContent);
+  /* 不进轮询：tick 只拉 /api/status，绝不能顺手把体检也带起来 */
+  net.calls.length = 0;
+  T.tick();
+  ok(!net.calls.some((c) => c.url === "/api/checkup"), "2 秒轮询不会带起体检请求",
+     net.calls.map((c) => c.url));
+
   T.ckReset();
   T.renderCheckup();
 
