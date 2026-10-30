@@ -470,7 +470,7 @@ function nextCk() {
     ok(el("ckScore").textContent === "64 分 · 1 项待优化", "分数与待优化项数",
        el("ckScore").textContent);
     ok(el("ckBody").hidden === false, "结果出来自动展开");
-    ok(/2\/3/.test(el("ckLine").textContent), "摘要写明启动项开关数",
+    ok(/^用时 \d+ ms$/.test(el("ckLine").textContent), "摘要只留用时（启动项条数在列表标题，不重复）",
        el("ckLine").textContent);
     ok(/ckdot bad/.test(el("ckItems")._html), "不达标项用红点");
     ok(/ckdot mid/.test(el("ckItems")._html), "中性项（ok=null）用黄点");

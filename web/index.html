@@ -847,7 +847,6 @@ function renderCheckup(){
   const items = ckData.items || [];
   const starts = ckData.startups || [];
   const bad = items.filter(function(x){ return x.ok === false; }).length;
-  const openOn = starts.filter(function(x){ return x.enabled; }).length;
 
   sc.textContent = (ckData.score==null ? "—" : ckData.score) + " 分" +
                    (bad ? " · " + bad + " 项待优化" : "");
@@ -857,8 +856,8 @@ function renderCheckup(){
     line.textContent = ckMsg;
     line.style.color = "var(--amber)";     // 操作回执：与常规摘要区分开
   }else{
-    line.textContent = "用时 " + Math.round(ckData.ms || 0) + " ms · 开机启动 " +
-                       openOn + "/" + starts.length + " 项开启";
+    // 摘要行只留用时：启动项条数列表第一行就有，不重复说一遍
+    line.textContent = "用时 " + Math.round(ckData.ms || 0) + " ms";
     line.style.color = "";
   }
 
