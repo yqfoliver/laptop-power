@@ -283,5 +283,30 @@ finally:
     config.exe_path = _old_exe2
     shutil.rmtree(tmp_root, ignore_errors=True)
 
+# ---------------------------------------------------------------- 9. 计划显示名
+print("== 9. scheme_label：别把裸 GUID 抛给用户 ==")
+from lp import manager as _mgr
+BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e"
+CUSTOM = "aaaa1111-2222-3333-4444-555566667777"
+ok(_mgr.scheme_label("", "", "") == "", "空 GUID 给空名")
+ok(_mgr.scheme_label(CUSTOM, CUSTOM, "笔记本自适应电源") == "笔记本自适应电源",
+   "自建计划用配置名")
+ok(_mgr.scheme_label(CUSTOM, CUSTOM, "") == "笔记本自适应电源",
+   "配置名缺失也有默认名")
+ok(_mgr.scheme_label(BALANCED, "", "",
+                     friendly=lambda g: "平衡") == "平衡",
+   "优先用 Windows 友好名")
+ok(_mgr.scheme_label(BALANCED, "", "", friendly=lambda g: "") == "平衡（系统默认）",
+   "友好名读不到 → 知名 GUID 固定名")
+ok(_mgr.scheme_label(BALANCED, "", "", friendly=lambda g: 1 / 0) == "平衡（系统默认）",
+   "friendly 抛异常不炸、走兜底")
+ok(_mgr.scheme_label("deadbeef-1234", "", "", friendly=lambda g: "") ==
+   "deadbeef-1234", "无名陌生计划才退回 GUID")
+ok(_mgr.scheme_label(BALANCED.upper(), "", "", friendly=lambda g: "") ==
+   "平衡（系统默认）", "GUID 大小写不敏感")
+import inspect
+ok("scheme_label(" in inspect.getsource(_mgr.Manager.status),
+   "status().scheme_name 已改走 scheme_label")
+
 print("\n通过 %d，失败 %d" % (PASS, FAIL))
 raise SystemExit(1 if FAIL else 0)
