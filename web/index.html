@@ -186,15 +186,6 @@
     <div class="okline" id="battOk" style="margin-top:3px"></div>
     <div class="advline" id="battAdv"></div>
   </div>
-
-  <div class="card" id="loadCard">
-    <div class="ct"><span class="t">负载状态</span><span class="r" id="loadState">—</span></div>
-    <div class="row">
-      <div class="lbar"><i id="loadBar" style="width:0%"></i></div>
-      <span class="load-pct" id="loadPct">0%</span>
-    </div>
-    <div class="hint" id="loadDetail">CPU — · 磁盘 — · 网络 — · 独显 —</div>
-  </div>
   </div>
 
   <div class="col">
@@ -235,6 +226,19 @@
   </div>
   </div>
 
+  <div class="cols">
+  <div class="col">
+  <div class="card" id="loadCard">
+    <div class="ct"><span class="t">负载状态</span><span class="r" id="loadState">—</span></div>
+    <div class="row">
+      <div class="lbar"><i id="loadBar" style="width:0%"></i></div>
+      <span class="load-pct" id="loadPct">0%</span>
+    </div>
+    <div class="hint" id="loadDetail">CPU — · 磁盘 — · 网络 — · 独显 —</div>
+  </div>
+  </div>
+
+  <div class="col">
   <div class="card" id="gpCard">
     <div class="ct"><span class="t">核显优先</span><span class="r" id="gpVerdict" style="color:var(--muted)">—</span></div>
     <div class="hint" id="gpLine">—</div>
@@ -244,6 +248,8 @@
       <button class="btn" id="gpAuto">交回系统</button>
       <button class="btn" id="gpProbe">试试核显</button>
     </div>
+  </div>
+  </div>
   </div>
 
   <div class="card" id="ckCard">
