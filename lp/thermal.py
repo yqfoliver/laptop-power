@@ -123,6 +123,22 @@ class ThermalPolicy:
     # ------------------------------------------------------------ 参数
     def _load(self) -> None:
         c = self.cfg
+
+        # 坏值不许炸掉构造（2026-10-30）：这些键以前直接 float()/int()，
+        # 一个 "abc" 会在 **Manager 构造期**抛 ValueError —— 表现是程序
+        # 双击了没反应，只有 startup_err.log 里一行 traceback。
+        # config.sanitize 已覆盖这些键（补了声明），这里再兜一道。
+        def _f(key, dft):
+            try:
+                v = float(c.get(key, dft))
+            except (TypeError, ValueError):
+                return float(dft)
+            return float(dft) if v != v else v          # NaN 也不认
+
+        def _pct(key, dft, lo=30, hi=100):
+            """百分比：夹到 [lo, hi]（固件对小值会拒写，对 0 会直接卡顿）"""
+            return int(max(lo, min(hi, _f(key, dft))))
+
         self.cpu_cap_ac: Optional[int] = None
         self.relief_trigger: Optional[float] = None
         self.relief_cap_cpu: Optional[int] = None
@@ -130,16 +146,16 @@ class ThermalPolicy:
         self.alloc_gpu_temp: Optional[float] = None
 
         if self.mode == "quiet":
-            self.cpu_cap_ac = max(30, min(100, int(c.get("thermal_quiet_cpu_pct", 75))))
-            self.relief_trigger = float(c.get("thermal_quiet_relief_c", 88))
-            self.relief_cap_cpu = max(30, min(100, int(c.get("thermal_quiet_relief_pct", 70))))
-            self.alloc_cpu_temp = float(c.get("thermal_quiet_gpu_cpu_temp_c", 90))
-            self.alloc_gpu_temp = float(c.get("thermal_quiet_gpu_temp_c", 86))
+            self.cpu_cap_ac = _pct("thermal_quiet_cpu_pct", 75)
+            self.relief_trigger = _f("thermal_quiet_relief_c", 88)
+            self.relief_cap_cpu = _pct("thermal_quiet_relief_pct", 70)
+            self.alloc_cpu_temp = _f("thermal_quiet_gpu_cpu_temp_c", 90)
+            self.alloc_gpu_temp = _f("thermal_quiet_gpu_temp_c", 86)
         elif self.mode == "perf":
-            self.relief_trigger = float(c.get("thermal_perf_relief_c", 98))
-            self.relief_cap_cpu = max(30, min(100, int(c.get("thermal_perf_relief_pct", 85))))
-            self.alloc_cpu_temp = float(c.get("thermal_perf_gpu_cpu_temp_c", 98))
-            self.alloc_gpu_temp = float(c.get("thermal_perf_gpu_temp_c", 92))
+            self.relief_trigger = _f("thermal_perf_relief_c", 98)
+            self.relief_cap_cpu = _pct("thermal_perf_relief_pct", 85)
+            self.alloc_cpu_temp = _f("thermal_perf_gpu_cpu_temp_c", 98)
+            self.alloc_gpu_temp = _f("thermal_perf_gpu_temp_c", 92)
 
         # 硬件杠杆（可被 config 覆盖，方便面板做高级设置）
         base = HW_TARGET.get(self.mode) or {}

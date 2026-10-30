@@ -156,28 +156,46 @@ class BatteryCare:
     # ------------------------------------------------------------ 参数
     def _load_params(self):
         c = self.cfg
+
+        # 坏值不许炸掉整块养护（2026-10-30）：这些键以前直接 float()/int()，
+        # 一个 "abc"（面板 POST、手改 config.json、旧版本残留）就会在
+        # **构造期**抛 ValueError ⇒ Manager 建不起来 ⇒ 程序静默不启动。
+        # 护栏在 config.sanitize 那里有一道，这里再兜一道：读不动的值退回默认。
+        def _f(key, dft):
+            try:
+                v = float(c.get(key, dft))
+            except (TypeError, ValueError):
+                return float(dft)
+            return float(dft) if v != v else v          # NaN 也不认
+
+        def _i(key, dft):
+            try:
+                return int(round(_f(key, dft)))
+            except (TypeError, ValueError):
+                return int(dft)
+
         self.enabled = bool(c.get("battery_care_enabled", True))
-        self.full_soc = float(c.get("care_full_soc_pct", 95))
-        self.deep_soc = float(c.get("care_deep_soc_pct", 20))
-        self.advise_limit = int(c.get("care_advise_charge_limit_pct", 80))
-        self.hot_charge_c = float(c.get("care_hot_charge_c", 88))
+        self.full_soc = _f("care_full_soc_pct", 95)
+        self.deep_soc = _f("care_deep_soc_pct", 20)
+        self.advise_limit = _i("care_advise_charge_limit_pct", 80)
+        self.hot_charge_c = _f("care_hot_charge_c", 88)
         self.relief_enabled = bool(c.get("care_heat_relief", True))
-        self.relief_cap = int(c.get("care_heat_relief_cpu_pct", 70))
-        self.relief_clear_c = float(c.get("care_heat_relief_clear_c", 82))
+        self.relief_cap = _i("care_heat_relief_cpu_pct", 70)
+        self.relief_clear_c = _f("care_heat_relief_clear_c", 82)
         # 插电高温保护（2026-10-05 新增）：不止充电中——已充满插电跑重负载
         # 时 CPU 热区也会到 92℃+（NVML slowdown 线 91℃），长期贴着温度墙跑
         # 既掉频又伤机器。触发后临时压 AC CPU 上限，回落再还原。
         self.thermal_relief = bool(c.get("care_thermal_relief", True))
-        self.hot_cpu_c = float(c.get("care_hot_cpu_c", 95))
-        self.thermal_clear_c = float(c.get("care_thermal_clear_c", 89))
-        self.thermal_cap = int(c.get("care_thermal_cpu_pct", 80))
+        self.hot_cpu_c = _f("care_hot_cpu_c", 95)
+        self.thermal_clear_c = _f("care_thermal_clear_c", 89)
+        self.thermal_cap = _i("care_thermal_cpu_pct", 80)
         # ---- 按场景的充电上限（2026-10-11）----
-        self.target_limit = int(c.get("care_target_limit_pct", 80))    # 养护上限
-        self.full_limit = int(c.get("care_full_limit_pct", 100))       # 充满
-        self.calib_days = int(c.get("care_calibrate_days", 30))        # 校准周期
-        self.intent_h = float(c.get("care_full_intent_h", 24.0))       # 意图有效期
-        self.mobile_dc_h = float(c.get("care_mobile_dc_h_day", 1.0))   # 日均离电≥此值=常带出门
-        self.scene_days = int(c.get("care_scene_days", 7))             # 场景回看天数
+        self.target_limit = _i("care_target_limit_pct", 80)    # 养护上限
+        self.full_limit = _i("care_full_limit_pct", 100)       # 充满
+        self.calib_days = _i("care_calibrate_days", 30)        # 校准周期
+        self.intent_h = _f("care_full_intent_h", 24.0)         # 意图有效期
+        self.mobile_dc_h = _f("care_mobile_dc_h_day", 1.0)    # 日均离电≥此值=常带出门
+        self.scene_days = _i("care_scene_days", 7)             # 场景回看天数
 
     def reload_cfg(self, cfg: Optional[Dict] = None):
         if cfg is not None:

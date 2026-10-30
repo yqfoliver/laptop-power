@@ -229,7 +229,7 @@ def main(argv=None) -> int:
     if cfg.get("open_panel_on_start", False):
         webui.open_browser(url)
 
-    register_hotkey(traylib_tray.hwnd)
+    register_hotkey(traylib_tray.hwnd, cfg.get("hotkey"))
 
     if not cfg.get("first_run_done"):
         cfg["first_run_done"] = True
@@ -505,14 +505,61 @@ def _open_webview2(url) -> bool:
     return _wv2_send("show\t%s" % url)
 
 
-def register_hotkey(hwnd: int) -> bool:
-    """Ctrl+Alt+P 打开控制面板"""
+def parse_hotkey(spec) -> tuple:
+    """把 "Ctrl+Alt+P" 解析成 (modifiers, vk)。
+
+    config 里一直有 `hotkey` 这个键（默认 "Ctrl+Alt+P"），但注册热键的代码
+    把 0x02|0x01 + 'P' **写死**了 —— 改配置一点用都没有，属于「配置项是谎言」。
+    这里统一解析；认不出来的写法直接回退默认组合，绝不静默注册一个错的键
+    （注册错的组合会白白抢走别人的全局快捷键）。
+    """
+    MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
+    dft = (MOD_CTRL | MOD_ALT, 0x50)          # Ctrl+Alt+P
     try:
+        parts = [p.strip().lower() for p in str(spec or "").split("+") if p.strip()]
+    except Exception:
+        return dft
+    if len(parts) < 2:
+        return dft
+    mods = 0
+    for p in parts[:-1]:
+        if p in ("ctrl", "control"):
+            mods |= MOD_CTRL
+        elif p == "alt":
+            mods |= MOD_ALT
+        elif p == "shift":
+            mods |= MOD_SHIFT
+        elif p in ("win", "windows"):
+            mods |= MOD_WIN
+        else:
+            return dft                        # 不认识的修饰键 ⇒ 回默认
+    key = parts[-1]
+    if len(key) == 1 and ("a" <= key <= "z" or "0" <= key <= "9"):
+        vk = ord(key.upper())
+    elif key.startswith("f") and key[1:].isdigit() and 1 <= int(key[1:]) <= 24:
+        vk = 0x70 + int(key[1:]) - 1
+    else:
+        return dft
+    return (mods or (MOD_CTRL | MOD_ALT), vk)
+
+
+def register_hotkey(hwnd: int, spec: str = "Ctrl+Alt+P") -> bool:
+    """注册全局热键（组合取自 config.json 的 hotkey）。
+
+    托盘窗口没建成（hwnd=0）时**不注册**：RegisterHotKey(NULL) 会把组合挂到
+    线程队列上，而本程序的消息泵按 hwnd 派发，热键永远没人处理 —— 结果是
+    「Ctrl+Alt+P 被本程序吞了，按下去什么也不发生」，还把别的程序的同一个
+    快捷键一起废掉。
+    """
+    if not hwnd:
+        return False
+    try:
+        mods, vk = parse_hotkey(spec)
         u = ctypes.WinDLL("user32", use_last_error=True)
         u.RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint,
                                      ctypes.c_uint]
         u.RegisterHotKey.restype = ctypes.c_int
-        return bool(u.RegisterHotKey(hwnd, 1, 0x0002 | 0x0001, 0x50))   # CTRL|ALT, 'P')
+        return bool(u.RegisterHotKey(hwnd, 1, mods, vk))
     except Exception:
         return False
 
@@ -622,7 +669,15 @@ def toggle_autostart(mgr) -> bool:
     _AUTO[0] = ok and on
     if _TRAY[0]:
         try:
-            _TRAY[0].notify("开机自启", "已%s" % ("开启" if on else "关闭"))
+            # 气泡必须反映**真实结果**：以前不管 set_autostart 成没成都报「已开启」，
+            # 而 Run 键写失败最常见的原因（Defender 删了 exe、注册表被锁）恰恰
+            # 需要用户当场知道 —— 报成功等于把故障藏起来。
+            if ok:
+                _TRAY[0].notify("开机自启", "已%s" % ("开启" if on else "关闭"))
+            else:
+                _TRAY[0].notify("开机自启",
+                                "设置失败（可能被安全软件拦截），当前仍为%s"
+                                % ("开启" if _AUTO[0] else "关闭"))
         except Exception:
             pass
     return _AUTO[0]

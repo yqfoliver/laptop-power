@@ -242,8 +242,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, mgr.status())
         elif path == "/api/settings":
             from . import config as cfgmod
-            for k in ("low_battery_percent", "poll_seconds", "notify",
-                      "minimize_to_tray", "open_panel_on_start"):
+            # 只列**真被读取**的键：从前这里收 low_battery_percent /
+            # minimize_to_tray / battery_eco_percent 三个没人读的键，
+            # 面板改了也什么都不发生（配置项是谎言，比没有更糟）。
+            for k in ("poll_seconds", "notify", "open_panel_on_start"):
                 if k in data:
                     mgr.cfg[k] = data[k]
             # 游戏档 CPU/独显 功耗分配参数（2026-10-04 新增）
@@ -255,7 +257,7 @@ class Handler(BaseHTTPRequestHandler):
                 if k in data:
                     mgr.cfg[k] = data[k]
             # 离电续航参数（2026-10-04 新增）
-            for k in ("battery_eco_percent", "battery_saver_percent",
+            for k in ("battery_saver_percent",
                       "refresh_on_battery", "dc_refresh_hz", "battery_eta",
                       "dc_brightness_cap", "idle_dim_enabled",
                       "panel_engine",

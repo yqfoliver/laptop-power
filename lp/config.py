@@ -29,7 +29,6 @@ DEFAULT_CONFIG = {
     "custom_scheme_name": "笔记本自适应电源",
     "auto_mode": True,               # 自动判定开关
     "poll_seconds": 5,
-    "low_battery_percent": 20,       # 低于该电量，游戏中也降级
     "manual_override": None,         # 手动锁定的档位名（null=跟随自动）
     "system_whitelist": [
         "explorer.exe", "dwm.exe", "shellexperiencehost.exe", "searchhost.exe",
@@ -44,7 +43,7 @@ DEFAULT_CONFIG = {
     "game_list": default_lists()["game_list"],
     "office_list": default_lists()["office_list"],
     "notify": False,                 # 静默优先：默认不弹任何气泡（用户 2026-10-04 要求）
-    "minimize_to_tray": True,
+    "open_panel_on_start": False,    # 启动后自动调浏览器打开面板（默认静默不开）
     "autostart": False,
     "autostart_notified": True,      # 已取消"首次运行提示自启"的气泡，视为已提示过
     "learn_enabled": True,            # 自学习总开关
@@ -83,7 +82,6 @@ DEFAULT_CONFIG = {
     # ---------------- 离电续航（2026-10-04 新增） ----------------
     # 离电时独显通常休眠，剩下的耗电大头只有两个：SoC（CPU+核显）与屏幕。
     # 所以离电策略围绕这两件事做；**机器不同，收益也不同**，别照搬任何数字。
-    "battery_eco_percent": 35,        # 【当前无效】低电量进续航档阈值；离电一律续航档已完全覆盖它，代码中未读取
     "battery_saver_percent": 15,      # 拔电且低于此电量：进「极限续航」档
     "refresh_on_battery": True,       # 拔电时降低屏幕刷新率
     # 拔电用的刷新率：None=自动挑「本机真实存在的、比当前低的最高档」
@@ -182,6 +180,34 @@ DEFAULT_CONFIG = {
     # 两个门槛取更严格的那个 —— 只有绝对余量会振荡（降刷本身就能省 20~28W，
     # 省完就"达标"→ 还原 → 又顶到上限 → 再限帧，屏幕反复黑一下）。
     "pd_restore_ratio": 0.62,
+
+    # ---------------- 散热/噪音策略（2026-10-30 补声明） ----------------
+    # 这批键过去**只以 cfg.get(key, 默认值) 的形式活在各模块里**，没进
+    # DEFAULT_CONFIG ⇒ sanitize() 遍历不到它们（护栏只覆盖声明过的键），
+    # 而 /api/settings 又能写。一个 "abc" 落盘后，下次启动
+    # ThermalPolicy/BatteryCare 构造时 float("abc") 直接抛 ValueError，
+    # Manager 建不起来 —— 进程静默退出，只在 startup_err.log 留一行。
+    # 与 poll_seconds:"abc" 是同一类：**护栏没覆盖的键 = 没有护栏**。
+    "thermal_mode": "auto",              # auto / quiet / perf
+    "thermal_quiet_cpu_pct": 75,
+    "thermal_quiet_relief_c": 88,
+    "thermal_quiet_relief_pct": 70,
+    "thermal_quiet_gpu_cpu_temp_c": 90,
+    "thermal_quiet_gpu_temp_c": 86,
+    "thermal_perf_relief_c": 98,
+    "thermal_perf_relief_pct": 85,
+    "thermal_perf_gpu_cpu_temp_c": 98,
+    "thermal_perf_gpu_temp_c": 92,
+    "thermal_atk_enabled": False,         # True 时 quiet→ATK 模式2 / perf→模式1
+    # 插电高温保护（与 care_heat_relief「充电高热」是两条独立触发线）
+    "care_thermal_relief": True,
+    "care_hot_cpu_c": 95,
+    "care_thermal_clear_c": 89,
+    "care_thermal_cpu_pct": 80,
+    # 其余「隐藏开关」：代码里读、面板不暴露，补声明后才会被 sanitize 管住
+    "error_log": True,                    # lp/errlog 总开关
+    "self_eco_on_battery": True,          # 离电时把自己也按省电配置跑
+    "auto_game_gpu_pct": 50,              # 独显占用超此值即判「在游戏」
 }
 
 
@@ -220,6 +246,13 @@ def load() -> dict:
     return cfg
 
 
+# 枚举型开关的合法取值。写错字面量（"quiet "/"Quiet"/"perf "）在各模块里
+# 通常表现为「静默按默认走」—— 用户以为改成功了，其实没生效。
+_ENUMS = {
+    "thermal_mode": ("auto", "quiet", "perf"),
+    "panel_engine": ("auto", "gdi", "browser", "webview2"),
+}
+
 # 数值键的安全范围。只列「越界会造成实际后果」的键：
 #   · 时间类（poll/settle/hold）太小 = busyloop 或防抖失效，太大 = 功能等于没开
 #   · 百分比类（亮度/CPU/阈值）越界会让写入被固件拒绝或把屏幕调成全黑
@@ -254,10 +287,36 @@ _NUM_LIMITS = {
     "idle_dim_level": (0, 100),
     "idle_dim_after_s": (5, 3600),
     "battery_saver_percent": (0, 100),
-    "low_battery_percent": (0, 100),
     "auto_game_gpu_pct": (0, 100),
     "panel_font_scale": (0.5, 2.5),
     "gpupick_igpu_tier": (1, 3),
+    # 散热策略（2026-10-30）：百分比越界会被固件拒写或把 CPU 压到卡顿，
+    # 温度线越界则等于「保护永不触发」或「一开机就压」
+    "thermal_quiet_cpu_pct": (10, 100),
+    "thermal_quiet_relief_pct": (10, 100),
+    "thermal_perf_relief_pct": (10, 100),
+    "thermal_quiet_relief_c": (30.0, 115.0),
+    "thermal_perf_relief_c": (30.0, 115.0),
+    "thermal_quiet_gpu_cpu_temp_c": (30.0, 120.0),
+    "thermal_quiet_gpu_temp_c": (30.0, 120.0),
+    "thermal_perf_gpu_cpu_temp_c": (30.0, 120.0),
+    "thermal_perf_gpu_temp_c": (30.0, 120.0),
+    # 电池养护
+    "care_full_soc_pct": (0, 100),
+    "care_deep_soc_pct": (0, 100),
+    "care_advise_charge_limit_pct": (0, 100),
+    "care_hot_charge_c": (30.0, 115.0),
+    "care_heat_relief_cpu_pct": (10, 100),
+    "care_heat_relief_clear_c": (30.0, 115.0),
+    "care_thermal_cpu_pct": (10, 100),
+    "care_hot_cpu_c": (30.0, 115.0),
+    "care_thermal_clear_c": (30.0, 115.0),
+    "care_target_limit_pct": (0, 100),
+    "care_full_limit_pct": (0, 100),
+    "care_calibrate_days": (1, 365),
+    "care_full_intent_h": (0.0, 720.0),
+    "care_mobile_dc_h_day": (0.0, 24.0),
+    "care_scene_days": (1, 90),
 }
 
 
@@ -275,6 +334,16 @@ def sanitize(cfg: dict) -> list:
         if isinstance(default, bool):
             v = cfg.get(key)
             if not isinstance(v, bool):
+                cfg[key] = default
+                fixed.append(key)
+            continue
+        # 枚举键：只允许表里列举的字面量。
+        # 以前这里直接 continue，`thermal_mode: "abc"` 会原样留在 config.json 里
+        # （运行时由 ThermalPolicy 自己兜回 auto，但 /api/config 会把 "abc"
+        # 显示给面板，改一次就被覆盖，看着像「设置没保存」）。
+        allowed = _ENUMS.get(key)
+        if allowed is not None:
+            if cfg.get(key) not in allowed:
                 cfg[key] = default
                 fixed.append(key)
             continue
@@ -330,7 +399,10 @@ def _migrate(cfg: dict) -> None:
     # 清理从未被读取的废弃键（写错名字或调试时误建的残留），留着只会误导排查
     # 2026-10-24：pd_s4_gpu_off 随 S4 废除一起退场（config.json 里的残留
     # 来自旧版本默认值，不是用户选择）
-    for dead in ("manual", "pd_s4_gpu_off"):
+    # 2026-10-30：low_battery_percent / minimize_to_tray / battery_eco_percent
+    # 三个键全项目没有任何读取点（面板却能改、改了什么都不发生）⇒ 一并退场。
+    for dead in ("manual", "pd_s4_gpu_off", "low_battery_percent",
+                 "minimize_to_tray", "battery_eco_percent"):
         if dead in cfg and dead not in DEFAULT_CONFIG:
             cfg.pop(dead, None)
 

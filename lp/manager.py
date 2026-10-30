@@ -369,9 +369,9 @@ class Manager:
         heavy = bool(summary and summary.get("heavy"))
 
         pct = st.get("battery_percent")
-        # 注：battery_eco_percent（低电量进续航档的阈值）目前**不参与判定** ——
-        # 离电一律续航档是更严格的规则，已完全覆盖它。配置项保留仅供将来参考，
-        # 这里不再读取（2026-10-07 清理：读了不用的死变量会让维护者误以为生效）。
+        # 注：原 battery_eco_percent（低电量进续航档）已删除 —— 离电一律续航档
+        # 是更严格的规则，完全覆盖它。删除而不是留着，是因为「配置项在、改了
+        # 没反应」比「没有这个配置」更容易误导（2026-10-30 清理）。
         saver_pct = int(self.cfg.get("battery_saver_percent", 15))
 
         if is_game:
