@@ -398,6 +398,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, checkup.set_startup(sid, on))
             except Exception as e:
                 self._json(200, {"ok": False, "msg": str(e)})
+        elif path == "/api/checkup_fix":
+            # 一键优化的一步：把某个体检项调到推荐状态。
+            # 只认 checkup.FIX_KEYS 白名单，写什么值在 checkup 里写死 ——
+            # 不给前端传数值的口子（这条接口同样暴露在本地 HTTP 上）。
+            try:
+                from . import checkup
+                key = str((data or {}).get("key") or "")
+                if key not in checkup.FIX_KEYS:
+                    self._json(400, {"error": "bad fix key"})
+                else:
+                    self._json(200, checkup.apply_fix(key))
+            except Exception as e:
+                self._json(200, {"ok": False, "msg": str(e)})
         elif path == "/api/notify":
             if mgr.on_notify:
                 mgr.on_notify(data.get("title", ""), data.get("text", ""))

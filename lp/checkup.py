@@ -315,9 +315,11 @@ def run_checks(mgr=None, deep: bool = False) -> dict:
     t0 = time.perf_counter()
     items = []
 
-    def add(key, title, value, ok, advice=""):
+    def add(key, title, value, ok, advice="", fix=None):
         items.append({"key": key, "title": title, "value": value,
                       "ok": ok, "advice": advice})
+        if fix:
+            items[-1]["fix"] = fix
 
     # 1) 启动项
     st = startup_items()
@@ -340,18 +342,37 @@ def run_checks(mgr=None, deep: bool = False) -> dict:
             dk["free_gb"] > 15, "" if dk["free_gb"] > 15 else "剩余空间不足，休眠/更新会失败，建议清理")
 
     # 3) 游戏相关三键
+    #    读数走 hw.gaming_states() 的扁平口径（None = 键缺失 = 系统默认）。
+    #    旧代码拿 gaming_env() 的返回值 .get("hags")，而那个 dict 只有
+    #    items/hints —— HAGS 和游戏模式恒显「关」被扣分、录制恒显「关」
+    #    直接通过，全是假读数。
     try:
         from . import hw
-        ge = hw.gaming_env() or {}
-        add("hags", "硬件加速 GPU 调度",
-            "开" if ge.get("hags") else "关", bool(ge.get("hags")),
-            "" if ge.get("hags") else "开着能降低游戏延迟（需重启生效）")
-        add("game_mode", "Windows 游戏模式",
-            "开" if ge.get("game_mode") else "关", bool(ge.get("game_mode")),
-            "" if ge.get("game_mode") else "开着系统会优先把资源给游戏")
+        gs = hw.gaming_states() or {}
+        hags = gs.get("hags")
+        if hags is None:
+            add("hags", "硬件加速 GPU 调度", "系统默认", None,
+                "Win11 24H2 起支持的显卡默认开启；点「一键优化」可确保显式打开")
+        else:
+            add("hags", "硬件加速 GPU 调度",
+                "开" if hags else "关", bool(hags),
+                "" if hags else "开着能降低游戏延迟（需重启生效）",
+                fix=None if hags else "hags")
+        gm = gs.get("game_mode")
+        if gm is None:
+            add("game_mode", "Windows 游戏模式", "系统默认", None,
+                "未手动改过；Win11 默认开启")
+        else:
+            add("game_mode", "Windows 游戏模式",
+                "开" if gm else "关", bool(gm),
+                "" if gm else "开着系统会优先把资源给游戏",
+                fix=None if gm else "game_mode")
+        dvr = gs.get("game_dvr")
+        # 只有「显式打开」才算开；键缺失 = 默认就是关的
         add("dvr", "后台游戏录制",
-            "关" if not ge.get("dvr") else "开", not ge.get("dvr"),
-            "" if not ge.get("dvr") else "后台录制会一直占 GPU，平时建议关掉")
+            "开" if dvr else "关", not dvr,
+            "" if not dvr else "后台录制会一直占 GPU，平时建议关掉",
+            fix="game_dvr" if dvr else None)
         cl = hw.asus_charge_limit() or {}
         if cl.get("percent") is not None:
             add("charge_limit", "充电阈值", "%d%%" % cl["percent"], True,
@@ -434,3 +455,60 @@ def summary_line(res: dict) -> str:
     n_on = sum(1 for x in res.get("startups", []) if x["enabled"])
     return "体检 %d 分 · %d 项待优化 · 启动项 %d" % (
         res.get("score", 0), len(bad), n_on)
+
+
+# ------------------------------------------------------------------ 一键优化
+# 可修复项的白名单。「一键优化」只碰这三个系统设置，写什么值在下面写死，
+# 不接受任何来自前端的数值参数 —— 这条接口跟 startup_set 一样暴露在
+# 本地 HTTP 上，参数越少越安全。
+# 写入目标放模块级 dict：测试把条目替换成 HKCU 临时键即可验证读写闭环，
+# 不用真改用户的系统设置。
+FIX_KEYS = ("hags", "game_mode", "game_dvr")
+
+FIX_TARGETS = {
+    # key: (hive, path, name, value, 成功文案)
+    "hags": (winreg.HKEY_LOCAL_MACHINE,
+             r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",
+             "HwSchMode", 2, "已开启，重启后生效"),
+    "game_mode": (winreg.HKEY_CURRENT_USER,
+                  r"Software\Microsoft\GameBar",
+                  "AutoGameModeEnabled", 1, "已开启"),
+    # 关后台录制：主开关 + 旧键名一起写，两处都可能被读（见 hw._GAME_ALT）
+    "game_dvr": (winreg.HKEY_CURRENT_USER,
+                 r"Software\Microsoft\Windows\CurrentVersion\GameDVR",
+                 "AppCaptureEnabled", 0, "已关闭"),
+}
+
+
+def _reg_write(hive, path: str, name: str, value: int):
+    try:
+        k = winreg.CreateKey(hive, path)      # 键不存在就创建（GameBar 常见）
+    except Exception as e:
+        return False, ("需要管理员" if getattr(e, "winerror", 0) == 5 else str(e))
+    try:
+        winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, int(value))
+        return True, "ok"
+    except Exception as e:
+        return False, ("需要管理员" if getattr(e, "winerror", 0) == 5 else str(e))
+    finally:
+        try:
+            winreg.CloseKey(k)
+        except Exception:
+            pass
+
+
+def apply_fix(key: str) -> dict:
+    """把某个体检项调到推荐状态（一键优化的一步）。返回 {ok, msg}
+
+    hags 在 HKLM，普通权限写不进去 —— 如实报「需要管理员」，
+    让用户自己去设置里开，而不是假装成功。
+    """
+    if key not in FIX_KEYS:
+        return {"ok": False, "msg": "不支持的项目"}
+    hive, path, name, value, okmsg = FIX_TARGETS[key]
+    ok, msg = _reg_write(hive, path, name, value)
+    if key == "game_dvr" and ok:
+        # 旧键名一并关掉：HW._GAME_ALT 里 HistoricalCaptureEnabled 任一为真
+        # 都会被当成开着，只写主键可能白写
+        _reg_write(hive, path, "HistoricalCaptureEnabled", 0)
+    return {"ok": ok, "msg": okmsg if ok else msg, "key": key}

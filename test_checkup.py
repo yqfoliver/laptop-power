@@ -168,6 +168,63 @@ def main():
     res2 = checkup.run_checks(None, deep=True)
     ck(isinstance(res2.get("top_procs"), list), "深度扫描返回进程列表")
 
+    # ------------------------------------------------------------ 一键优化
+    # 旧代码拿 gaming_env() 的返回值 .get("hags")，而那个 dict 只有 items/
+    # hints —— 三项游戏设置全是假读数（HAGS/游戏模式恒「关」被扣分）。
+    print("== 游戏三键读数（gaming_states 口径） ==")
+    from lp import hw as _hw
+    _real_states = _hw.gaming_states
+    try:
+        _hw.gaming_states = lambda: {"hags": False, "game_mode": True,
+                                     "game_dvr": True}
+        r = checkup.run_checks(None)
+        by = {x["key"]: x for x in r["items"]}
+        ck(by["hags"]["ok"] is False and by["hags"].get("fix") == "hags",
+           "HAGS 显式关闭 → 记为待优化且可修")
+        ck(by["game_mode"]["ok"] is True and "fix" not in by["game_mode"],
+           "游戏模式已开 → 通过、无修复标记")
+        ck(by["dvr"]["ok"] is False and by["dvr"].get("fix") == "game_dvr",
+           "后台录制开着 → 待优化且可修")
+
+        _hw.gaming_states = lambda: {"hags": None, "game_mode": None,
+                                     "game_dvr": None}
+        r = checkup.run_checks(None)
+        by = {x["key"]: x for x in r["items"]}
+        ck(by["hags"]["ok"] is None and "fix" not in by["hags"],
+           "键缺失 → 中性（系统默认），不扣分不给修复")
+        ck(by["dvr"]["ok"] is True and "fix" not in by["dvr"],
+           "录制键缺失 = 默认关闭 → 通过")
+    finally:
+        _hw.gaming_states = _real_states
+
+    print("== apply_fix 读写闭环（临时键，不动真实设置） ==")
+    _saved_tg = dict(checkup.FIX_TARGETS)
+    _fx_key = r"Software\LPPA_Test_Fix"
+    try:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _fx_key + r"\A")
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _fx_key)
+        except Exception:
+            pass
+        checkup.FIX_TARGETS["game_mode"] = (
+            winreg.HKEY_CURRENT_USER, _fx_key + r"\A", "TestVal", 1, "已开启")
+        checkup.FIX_TARGETS["hags"] = checkup.FIX_TARGETS["game_mode"]  # 别碰 HKLM
+        r = checkup.apply_fix("game_mode")
+        ck(r.get("ok") is True and r.get("msg") == "已开启", "修复成功返回文案")
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _fx_key + r"\A") as k:
+            ck(winreg.QueryValueEx(k, "TestVal")[0] == 1, "值真的写进去了")
+        ck(checkup.apply_fix("nonsense")["ok"] is False, "白名单外的 key 被拒")
+        # hags 指到临时键后也应该能写成功（证明成功路径与 key 名无关）
+        ck(checkup.apply_fix("hags")["ok"] is True, "hags 成功路径可用")
+    finally:
+        checkup.FIX_TARGETS.clear()
+        checkup.FIX_TARGETS.update(_saved_tg)
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _fx_key + r"\A")
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _fx_key)
+        except Exception:
+            pass
+
     # ---------------------------------------------------------------- 清理
     try:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, TEST_KEY)

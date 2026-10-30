@@ -199,6 +199,7 @@ const epilogue = `
   renderCheckup: renderCheckup,
   runCheckup: runCheckup,
   ckToggle: ckToggle,
+  ckFixAll: ckFixAll,
   ckTick: ckTick,
   esc: esc,
   ckState: function(){ return {data: ckData, open: ckOpen, msg: ckMsg, busy: ckBusy}; },
@@ -423,6 +424,32 @@ function ckPayload() {
   };
 }
 
+/* 一键优化夹具：两个可修项 + 一个普通不合格项（不可修，如启动项偏多） */
+function ckPayload2() {
+  const p = ckPayload();
+  p.score = 61;
+  p.items = [
+    { key: "startup", title: "开机启动项", value: "19 项启用", ok: false,
+      advice: "启动项偏多" },
+    { key: "hags", title: "硬件加速 GPU 调度", value: "关", ok: false,
+      advice: "开着能降低游戏延迟", fix: "hags" },
+    { key: "game_mode", title: "Windows 游戏模式", value: "关", ok: false,
+      advice: "开着系统会优先把资源给游戏", fix: "game_mode" },
+  ];
+  return p;
+}
+
+function ckFixedPayload() {
+  const p = ckPayload2();
+  p.score = 85;
+  p.items = p.items.map(function (x) {
+    if (x.fix) { return { key: x.key, title: x.title, value: "开",
+                          ok: true, advice: "" }; }
+    return x;
+  });
+  return p;
+}
+
 function nextCk() {
   console.log("\n== 12. 系统体检：按需拉取 + 启动项开关 ==");
   T.ckReset();
@@ -516,10 +543,68 @@ function nextCk() {
         ok(el("ckList").children[0] === keep2, "2 秒轮询不重建启动项列表");
         ok(el("ckScore").textContent === scoreBefore, "轮询不改体检分数（快照不该自己变）",
            el("ckScore").textContent);
-        next4();
+        nextFix();
       });
     });
   }).catch((e) => { ok(false, "体检测试抛异常：" + (e && e.stack || e)); next4(); });
+}
+
+function nextFix() {
+  console.log("\n== 13. 一键优化：只修可修的项，修完重跑体检 ==");
+  T.ckReset();
+  net.calls.length = 0;
+  net.payload = basePayload({ __routes: { "/api/checkup": ckPayload2() } });
+  return Promise.resolve(T.runCheckup()).then(() => {
+    ok(el("ckFix").style.display === "", "有待优化项时显示「一键优化」",
+       el("ckFix").style.display);
+    ok(typeof el("ckFix").onclick === "function", "一键优化绑定了 onclick");
+
+    /* --- 点一键优化：逐项 POST + 重跑体检 --- */
+    net.calls.length = 0;
+    net.payload = basePayload({ __routes: {
+      "/api/checkup_fix": { ok: true, msg: "已开启", key: "game_mode" },
+      "/api/checkup": ckFixedPayload(),
+    } });
+    return Promise.resolve(el("ckFix").onclick()).then(() => {
+      const fx = net.calls.filter((c) => c.url === "/api/checkup_fix");
+      ok(fx.length === 2, "两个可修项各发一次 POST", net.calls.map((c) => c.url));
+      ok(fx.every((c) => JSON.parse(c.opt.body).key === "hags" ||
+                        JSON.parse(c.opt.body).key === "game_mode"),
+         "POST 带的是 fix 键名");
+      ok(net.calls.some((c) => c.url === "/api/checkup"), "修完重跑一次体检");
+      ok(/已优化/.test(el("ckLine").textContent), "回执写明结果",
+         el("ckLine").textContent);
+      ok(el("ckScore").textContent.indexOf("85") >= 0, "分数刷新成修复后的",
+         el("ckScore").textContent);
+      ok(el("ckFix").style.display === "none", "修完后按钮自动隐藏",
+         el("ckFix").style.display);
+
+      /* --- 失败必须说真话（HAGS 需要管理员是最常见情形） --- */
+      net.calls.length = 0;
+      net.payload = basePayload({ __routes: {
+        "/api/checkup_fix": { ok: false, msg: "需要管理员" },
+        "/api/checkup": ckPayload2(),
+      } });
+      /* 第一次点击后 ckData 已刷成「无可修项」，先恢复到可修状态再点 */
+      return Promise.resolve(T.runCheckup());
+    }).then(() => {
+      return Promise.resolve(el("ckFix").onclick());
+    }).then(() => {
+      ok(/需要管理员/.test(el("ckLine").textContent),
+         "失败原因原样显示（不能吞）", el("ckLine").textContent);
+      ok(/没改成/.test(el("ckLine").textContent), "全失败时回执不冒充成功",
+         el("ckLine").textContent);
+
+      /* --- 没有可修项时按钮不显示（第 12 节的 payload 没有 fix 字段） --- */
+      T.ckReset();
+      net.payload = basePayload({ __routes: { "/api/checkup": ckPayload() } });
+      return Promise.resolve(T.runCheckup());
+    }).then(() => {
+      ok(el("ckFix").style.display === "none", "无可修项时不显示一键优化",
+         el("ckFix").style.display);
+      next4();
+    });
+  }).catch((e) => { ok(false, "一键优化测试抛异常：" + (e && e.stack || e)); next4(); });
 }
 
 /* ------------------------------------------------------------ 11. 静态一致性 */

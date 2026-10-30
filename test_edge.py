@@ -201,6 +201,19 @@ ok(st == 200, "同源 POST 放行（%s %s）" % (st, body[:40]))
 st, body = call("POST", "/api/notify", body=json.dumps({"title": "t"}),
                 headers={"Content-Type": "application/json"})
 ok(st == 200, "不带 Origin 的本地脚本（curl）照旧可用")
+# 一键优化路由：只认白名单 key（合法 key 的写入路径在 test_checkup 里用
+# 临时键验证过，这里不动用户的真实系统设置）
+st, body = call("POST", "/api/checkup_fix",
+                body=json.dumps({"key": r"dir:C:\\Windows\\notepad.exe"}),
+                headers={"Content-Type": "application/json",
+                         "Origin": "http://127.0.0.1:%d" % port})
+ok(st == 400, "一键优化白名单外的 key 被拒（%s %s）" % (st, body[:40]))
+st, body = call("POST", "/api/checkup_fix", body=json.dumps({"key": "hags"}),
+                headers={"Content-Type": "application/json",
+                         "Origin": "http://127.0.0.1:%d" % port})
+body = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+ok(st == 200 and ("ok" in body), "白名单内的 key 接受（HKLM 写入多半因无管理员失败，如实返回）",
+   "%s %s" % (st, body[:60]))
 srv.shutdown()
 
 # ---------------------------------------------------------------- 5. 体检连坐

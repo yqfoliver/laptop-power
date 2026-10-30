@@ -40,8 +40,7 @@
 
   .hero{padding:8px 10px}
   .hero .mode{font-size:16px;font-weight:700;letter-spacing:.2px}
-  .hero .autoTag{float:right;font-size:10.5px;font-weight:600}
-  .hero .desc{font-size:10.5px;color:var(--muted);margin-top:2px}
+  .hero .autoTag{float:right;font-size:10.5px;font-weight:600;cursor:pointer;user-select:none}  .hero .desc{font-size:10.5px;color:var(--muted);margin-top:2px}
   .hero .esaverNote{font-size:10.5px;color:var(--amber);margin-top:4px;line-height:1.45}
 
   /* 五个档位一行排布，省掉一整行高度 */
@@ -54,12 +53,6 @@
   button.mode .lb{font-size:10.5px;font-weight:600;display:block}
   button.mode.on{background:var(--accent);border-color:var(--accent);color:#fff;
            box-shadow:0 2px 8px rgba(var(--accent-rgb),.35)}
-
-  button.autoBanner{width:100%;border:1px solid var(--border);background:var(--card);
-    color:var(--accent);border-radius:6px;padding:7px;font-size:11.5px;font-weight:600;
-    cursor:pointer;font-family:inherit}
-  button.autoBanner:hover{background:var(--card2)}
-  button.autoBanner.off{color:var(--muted);font-weight:400}
 
   .ct{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}
   .ct .t{font-size:11.5px;font-weight:600;color:var(--text)}
@@ -155,15 +148,13 @@
   </header>
 
   <div class="card hero">
-    <span class="autoTag" id="autoTag">自动判定</span>
+    <span class="autoTag" id="autoTag" title="点击开启 / 关闭自动判定">自动判定</span>
     <div class="mode" id="mode">—</div>
     <div class="desc" id="reason"></div>
     <div class="esaverNote" id="esaverNote" hidden>⚡ 系统节能模式接管 CPU 限频 · 工具暂让位（卡顿来自系统节能）</div>
   </div>
 
   <div class="modes" id="modes"></div>
-
-  <button class="autoBanner" id="autoBtn">自动判定已开启</button>
 
   <div class="cols">
   <div class="col">
@@ -257,6 +248,7 @@
     <div class="hint" id="ckLine">点「体检」检查系统状态与开机启动项</div>
     <div class="fanbtns">
       <button class="btn" id="ckRun">体检</button>
+      <button class="btn" id="ckFix" style="display:none">一键优化</button>
       <button class="btn" id="ckMore">展开</button>
     </div>
     <div id="ckBody" hidden>
@@ -336,9 +328,9 @@ function render(){
   const tag = document.getElementById("autoTag");
   tag.textContent = auto ? "自动判定" : "手动锁定";
   tag.style.color = auto ? "var(--green)" : "var(--amber)";
-  const ab = document.getElementById("autoBtn");
-  ab.textContent = auto ? "✔ 自动判定已开启" : "自动判定已关闭（点此开启）";
-  ab.className = "autoBanner" + (auto?"":" off");
+  // 标签本身就是开关（2026-10-30 UI 精简：删掉整行横幅）。
+  // 关闭时文案已经变「手动锁定」+ 琥珀色，点了就能开回来，不需要第二处入口。
+  tag.onclick = function(){ post("/api/auto",{on:!state.auto}).then(tick).catch(function(){}); };
 
   try{ renderGpuPick(); }catch(e){ document.title = "面板渲染异常(GP): " + ((e&&e.message)||e); }
 
@@ -704,7 +696,7 @@ async function tickOnce(){
   if(document.title.indexOf("面板渲染异常") === 0) document.title = "笔记本电源自适应";
 }
 
-document.getElementById("autoBtn").onclick = ()=>post("/api/auto",{on:!state.auto}).then(tick).catch(()=>{});
+// 自动判定开关在 hero 的 autoTag 上绑定（render() 内），横幅已删
 // 「本次充满 / 回养护」两个按钮的绑定 —— 曾经整个 chgSet() 定义了却**从未
 // 绑定**，两个按钮点了什么都不会发生（后端接口一直在，纯前端漏接）。
 document.getElementById("chgFull").onclick    = ()=>chgSet("full");
@@ -829,10 +821,18 @@ function renderCheckup(){
   const body = document.getElementById("ckBody");
   const run = document.getElementById("ckRun");
   const more = document.getElementById("ckMore");
+  const fix = document.getElementById("ckFix");
   if(!sc || !line || !body) return;
 
   run.textContent = ckBusy ? "检查中…" : (ckData ? "重新体检" : "体检");
   run.disabled = ckBusy;
+
+  // 「一键优化」只在有待修复项时出现：没体检过、修完之后都不占地方。
+  // 启动项不算在内 —— 关哪个是用户自己的决定，不替他做。
+  const fixables = (ckData && ckData.items || []).filter(function(x){
+    return x.ok === false && x.fix;
+  });
+  if(fix) fix.style.display = fixables.length ? "" : "none";
 
   if(!ckData){
     sc.textContent = "—";
@@ -950,6 +950,44 @@ async function ckToggle(sid, on){
   }
 }
 
+/* 一键优化：把所有「可修复且当前不合格」的项逐个调到推荐状态，然后重跑
+   一次体检让分数立刻反映结果。逐项发请求而不是一个大批量接口 —— 单项失败
+   （HAGS 需要管理员）不影响其它项，回执也能说清每一条。 */
+async function ckFixAll(){
+  if(ckBusy) return;
+  const fixables = ((ckData && ckData.items) || []).filter(function(x){
+    return x.ok === false && x.fix;
+  });
+  if(!fixables.length) return;
+  ckBusy = true;
+  ckMsg = "正在优化…";
+  renderCheckup();
+  const goods = [], bads = [];
+  for(const it of fixables){
+    try{
+      const r = await post("/api/checkup_fix", {key: it.fix});
+      if(r && r.ok) goods.push(it.title);
+      else bads.push(it.title + "：" + ((r && r.msg) || "失败"));
+    }catch(e){
+      bads.push(it.title + "：请求失败");
+    }
+  }
+  try{
+    const d = await get("/api/checkup");
+    if(d && !d.error) ckData = d;      // 分数与各项状态立刻反映修复结果
+  }catch(e){ /* 体检失败不打紧，回执照报 */ }
+  ckBusy = false;
+  if(goods.length && bads.length){
+    ckMsg = "已优化 " + goods.join("、") + "；没改成 → " + bads.join("；");
+  }else if(goods.length){
+    ckMsg = "已优化 " + goods.join("、");
+  }else{
+    ckMsg = "没改成：" + bads.join("；");
+  }
+  ckMsgUntil = Date.now() + 10000;
+  renderCheckup();
+}
+
 /* 回执到期后要让位（不重绘的话「已停用 Steam」会一直挂着，像刚发生）
    只在真的过期那一刻重绘一次，平时零开销。 */
 function ckTick(){
@@ -957,6 +995,7 @@ function ckTick(){
 }
 
 document.getElementById("ckRun").onclick  = runCheckup;
+document.getElementById("ckFix").onclick  = ckFixAll;
 document.getElementById("ckMore").onclick = function(){ ckOpen = !ckOpen; renderCheckup(); };
 renderCheckup();
 
