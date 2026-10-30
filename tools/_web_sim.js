@@ -264,7 +264,7 @@ console.log("\n== 1. 模式按钮只建一次（每次轮询重建会吃掉点�
 load(basePayload());
 T.renderModes();
 const box = el("modes");
-ok(box.children.length === 5, "五档按钮已生成", box.children.length);
+ok(box.children.length === 3, "三档按钮已生成（五并三）", box.children.length);
 const firstBtn = box.children[0];
 firstBtn.__mark = "keep-me";
 T.renderModes();
@@ -277,6 +277,23 @@ T.renderModes();
 ok(box.children[0]._cls.has("on"), "游戏档按钮点亮");
 ok(!box.children[1]._cls.has("on"), "办公档不再点亮");
 ok(box.children[0] === firstBtn, "切档也不重建 DOM");
+
+/* ------------------------------------------------------------ 1b. 负载并入头部卡 */
+console.log("\n== 1b. 负载状态并入头部（原独立卡已删）==");
+load(basePayload({ load: { state: "轻负载", heavy: false, cpu: 12, disk: 3, net: 1, gpu: 5 },
+                   busy: 12, cooldown_left: 0 }));
+T.renderLoad();
+ok(/轻负载/.test(el("loadDetail").textContent), "档位状态名并入明细行开头",
+   el("loadDetail").textContent);
+ok(el("loadPct").textContent === "12%", "负载百分比照常更新", el("loadPct").textContent);
+ok(el("loadBar").style.width === "12%", "负载条宽度照常更新", el("loadBar").style.width);
+ok(el("loadDetail").style.color === "", "非重负载不高亮", el("loadDetail").style.color);
+load(basePayload({ load: { state: "重负载", heavy: true, cpu: 90, disk: 5, net: 0, gpu: 60 },
+                   busy: 90 }));
+T.renderLoad();
+ok(/已保护/.test(el("loadDetail").textContent), "重负载保护标记保留",
+   el("loadDetail").textContent);
+ok(el("loadDetail").style.color !== "", "重负载明细行变色提示", el("loadDetail").style.color);
 
 /* ------------------------------------------------------------ 2. 按钮真的会发请求 */
 console.log("\n== 2. 按钮点击真的发出 POST ==");

@@ -663,9 +663,10 @@ class NativePanel:
                        RECT(pad + S(16), y + S(44), W - pad - S(16), y + card_h - S(6)),
                        size_px=S(11), flags=DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS)
 
-        # ------------------------------------------------ 档位按钮（6 个 = 3 列 × 2 行）
-        profiles = [("gaming", "游戏"), ("office", "办公"),
-                    ("battery", "续航"), ("saver", "极限省电"), ("balanced", "平衡")]
+        # ------------------------------------------------ 档位按钮（3 个一行）
+        # 2026-10-30 五并三：平衡并入办公、省电并入续航（与 web 面板同步）。
+        # 旧的 saver/balanced 仍被后端接受（老配置/学习数据/命令行），只是不再有按钮。
+        profiles = [("gaming", "游戏"), ("office", "办公"), ("battery", "续航")]
         btn_w = (W - pad * 2 - S(10) * 2) // 3
         by = y + card_h + S(10)
         self._btns = []

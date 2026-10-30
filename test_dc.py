@@ -34,16 +34,16 @@ def mk(pct, ac, fg="explorer.exe", heavy=False):
     return t
 
 
-print("---- detect() 电量梯度 ----")
-check("离电 10% + 办公 -> 极限续航", mk(10, False, "msedge.exe"), "saver")
-check("离电 10% + 桌面 -> 极限续航", mk(10, False, "explorer.exe"), "saver")
+print("---- detect() 电量梯度（2026-10-30 五并三：省电并入续航、平衡并入办公）----")
+check("离电 10% + 办公 -> 续航（省电档已并入）", mk(10, False, "msedge.exe"), "battery")
+check("离电 10% + 桌面 -> 续航", mk(10, False, "explorer.exe"), "battery")
 check("离电 25% + 办公 -> 续航", mk(25, False, "msedge.exe"), "battery")
-check("离电 25% + 重负载 -> 办公", mk(25, False, "msedge.exe", heavy=True), "battery")
+check("离电 25% + 重负载 -> 续航", mk(25, False, "msedge.exe", heavy=True), "battery")
 check("离电 50% + 办公 -> 续航（离电铁律）", mk(50, False, "msedge.exe"), "battery")
 check("离电 50% + 桌面 -> 续航", mk(50, False, "explorer.exe"), "battery")
 check("离电 15% + 游戏 -> 游戏档(不分低电)", mk(15, False, "steam.exe"), "gaming")
 check("插电 100% + 办公 -> 办公", mk(100, True, "msedge.exe"), "office")
-check("插电 100% + 桌面 -> 平衡", mk(100, True, "explorer.exe"), "balanced")
+check("插电 100% + 桌面 -> 办公（平衡已并入）", mk(100, True, "explorer.exe"), "office")
 
 print("---- 刷新率目标 ----")
 m = Manager(config.load())
@@ -66,8 +66,11 @@ print("  状态=%s %s%% 放电=%sW 健康=%s%%" % (
 
 print("---- 档位表 ----")
 from lp.profiles import PROFILES
-check("新增极限续航档", "saver" in PROFILES, True)
-check("saver 离电 CPU 上限 15%", PROFILES["saver"]["dc"]["proc_max"], 15)
+# 2026-10-30 五并三：saver/balanced 从判定与 UI 退场，但 PROFILES 保留
+# 这两个条目（老配置、学习数据、托盘「回到系统平衡」还原路径还在用）。
+check("合并档位仍保留内部定义（还原路径用）",
+      "saver" in PROFILES and "balanced" in PROFILES, True)
+check("续航档离电 CPU 上限 30%", PROFILES["battery"]["dc"]["proc_max"], 30)
 check("续航档离电强制核显", PROFILES["battery"]["dc"]["gpu_pref"], 0)
 check("续航档离电含自适应亮度", "adapt_bright" in PROFILES["battery"]["dc"], True)
 
