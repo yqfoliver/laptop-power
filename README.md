@@ -134,7 +134,7 @@ python main.py --selftest        # 硬件通道自检
 python build_exe.py              # 打包成单文件 exe（须用项目 venv 的 python）
 ```
 
-打包注意：`lp/checkup`、`lp/autostart_task` 是动态 import，已在 `build_exe.py` 里显式加 `--hidden-import`。
+打包注意：`lp/autostart_task` 是动态 import，已在 `build_exe.py` 里显式加 `--hidden-import`。
 
 ### 测试
 

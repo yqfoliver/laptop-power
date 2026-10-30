@@ -760,36 +760,6 @@ def gaming_env() -> dict:
     return out
 
 
-def gaming_states() -> dict:
-    """体检专用的扁平读数：{hags, game_mode, game_dvr} → True/False/None。
-
-    None = 注册表里没有这个键（用户没手动改过，走系统默认）。
-    口径与 gaming_env 一致：
-      · hags：值 2 才算开；None 在 Win11 24H2 支持的显卡上默认就是开
-      · game_mode：None 时 Win11 默认开
-      · game_dvr：**显式开启才算开**（None = 默认关闭）
-
-    之所以单独给体检一个函数：checkup 旧代码拿 gaming_env() 的返回值
-    .get("hags")，而那个 dict 里只有 items/hints —— 三个键恒为 None，
-    体检里 HAGS 和游戏模式恒显「关」被扣分、后台录制恒显「关」直接通过。
-    """
-    out = {}
-    for key, hive, path, name, _label in _GAME_REG:
-        raw = _reg_read(hive, path, name)
-        if raw is None:
-            for hive2, path2, name2 in _GAME_ALT.get(key, ()):
-                raw = _reg_read(hive2, path2, name2)
-                if raw is not None:
-                    break
-        if raw is None:
-            out[key] = None
-        elif key == "hags":
-            out[key] = (int(raw) == 2)
-        else:
-            out[key] = bool(int(raw))
-    return out
-
-
 # ------------------------------------------------- 华硕「电池健康充电」阈值（只读）
 # 2026-10-05 标定：装了 MyASUS（ASUS System Control Interface v3）后，华硕会把
 # 充电上限镜像到 HKLM 注册表，普通权限可读、开销 ≈ 0。写入侧三条通道全部不通：

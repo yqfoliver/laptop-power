@@ -190,14 +190,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, mgr.learn_report())
             except Exception as e:
                 self._json(200, {"error": str(e)})
-        elif path == "/api/checkup":
-            # 系统体检 + 启动项清单（微软电脑管家式）。deep=1 时多采一次进程占用
-            try:
-                from . import checkup
-                deep = "deep" in self.path
-                self._json(200, checkup.run_checks(mgr, deep=deep))
-            except Exception as e:
-                self._json(200, {"error": str(e), "items": [], "startups": []})
         elif path == "/api/gpupick":
             self._json(200, mgr.gpupick_report())
         elif path == "/api/thermal":
@@ -386,31 +378,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "bad thermal mode"})
             else:
                 self._json(200, mgr.set_thermal_mode(mode))
-        elif path == "/api/startup_set":
-            # 启停一条开机启动项（可逆改名，不删数据）
-            try:
-                from . import checkup
-                sid = str((data or {}).get("id") or "")
-                on = bool(data.get("on", False))
-                if not sid:
-                    self._json(400, {"error": "need id"})
-                else:
-                    self._json(200, checkup.set_startup(sid, on))
-            except Exception as e:
-                self._json(200, {"ok": False, "msg": str(e)})
-        elif path == "/api/checkup_fix":
-            # 一键优化的一步：把某个体检项调到推荐状态。
-            # 只认 checkup.FIX_KEYS 白名单，写什么值在 checkup 里写死 ——
-            # 不给前端传数值的口子（这条接口同样暴露在本地 HTTP 上）。
-            try:
-                from . import checkup
-                key = str((data or {}).get("key") or "")
-                if key not in checkup.FIX_KEYS:
-                    self._json(400, {"error": "bad fix key"})
-                else:
-                    self._json(200, checkup.apply_fix(key))
-            except Exception as e:
-                self._json(200, {"ok": False, "msg": str(e)})
         elif path == "/api/notify":
             if mgr.on_notify:
                 mgr.on_notify(data.get("title", ""), data.get("text", ""))

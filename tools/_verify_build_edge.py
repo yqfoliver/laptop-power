@@ -48,12 +48,6 @@ print("mode=%s ac=%s batt=%s" % (st.get("mode"), st.get("ac"), st.get("battery")
 print("hz:", (st.get("display") or {}).get("current_hz"),
       "care:", (st.get("care") or {}).get("charge_line"))
 
-ck = get("/api/checkup", 20)
-print("checkup: score=%s ms=%s" % (ck.get("score"), ck.get("ms")))
-print("  items:", [(i["key"], i["ok"]) for i in ck.get("items", [])])
-print("  startups:", len(ck.get("startups") or []),
-      "自启项:", [x["name"] for x in (ck.get("startups") or []) if x.get("self")])
-
 print("跨站 POST（应 403）:", post("/api/notify", {"title": "x"},
                                    {"Content-Type": "text/plain",
                                     "Origin": "http://evil.com"}))
