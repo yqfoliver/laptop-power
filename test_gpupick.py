@@ -10,7 +10,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from lp.gpupick import GpuPick, PROBE_MIN_SAMPLES, PROBE_OK_P90, PROBE_HARD_P90  # noqa: E402
+from lp.gpupick import GpuPick  # noqa: E402
 
 OK = 0
 FAIL = []
@@ -103,55 +103,13 @@ def test_user_override():
     ck("用户钉独显会写入", reg.get(PATH_UN) == "GpuPreference=2;")
 
 
-def test_probe_ok():
-    """核显游刃有余 → 固化 igpu。"""
-    gp, reg = mk(tier=2)
-    gp.probe_start(PATH_UN, "unknowngame.exe", 999, seconds=0)
-    for _ in range(PROBE_MIN_SAMPLES + 2):
-        gp._probe["samples"].append(30.0)
-    gp.probe_tick()
-    ck("试探完成", gp._probe["done"] is True)
-    ck("判定为 ok", gp._probe["verdict"] == "ok")
-    ck("固化为核显", gp.data["apps"]["unknowngame.exe"]["mode"] == "igpu")
-    ck("固化来源是 probe", gp.data["apps"]["unknowngame.exe"]["src"] == "probe")
-    ck("保留核显设置", reg.get(PATH_UN) == "GpuPreference=1;")
-
-
-def test_probe_hard():
-    """核显吃满 → 退回独显，并把注册表还原成原值。"""
-    reg = {PATH_UN: "GpuPreference=2;"}
-    gp, reg = mk(tier=2, reg=reg)
-    gp.probe_start(PATH_UN, "unknowngame.exe", 999, seconds=0)
-    for _ in range(PROBE_MIN_SAMPLES + 2):
-        gp._probe["samples"].append(99.0)
-    gp.probe_tick()
-    ck("判定为 hard", gp._probe["verdict"] == "hard")
-    ck("退回独显", gp.data["apps"]["unknowngame.exe"]["mode"] == "dgpu")
-    ck("吃力时还原原值", reg.get(PATH_UN) == "GpuPreference=2;")
-
-
-def test_probe_marginal_and_nodata():
+def test_legacy_probe_entry():
+    """「手动试探」已退场，但历史数据里 src=probe 的条目必须照常生效。"""
     gp, _ = mk(tier=2)
-    gp.probe_start(PATH_UN, "u1.exe", 999, seconds=0)
-    for _ in range(PROBE_MIN_SAMPLES + 2):
-        gp._probe["samples"].append((PROBE_OK_P90 + PROBE_HARD_P90) / 2)
-    gp.probe_tick()
-    ck("中间地带判 marginal", gp._probe["verdict"] == "marginal")
-
-    gp2, _ = mk(tier=2)
-    gp2.probe_start(PATH_UN, "u2.exe", 999, seconds=0)
-    gp2._probe["samples"].append(50.0)      # 样本不足
-    gp2.probe_tick()
-    ck("样本不足判 no_data", gp2._probe["verdict"] == "no_data")
-    ck("样本不足不下结论", "u2.exe" not in gp2.data["apps"])
-
-    # 没在用 GPU（利用率 0）不算有效样本
-    gp3, _ = mk(tier=2)
-    gp3.probe_start(PATH_UN, "u3.exe", 999, seconds=0)
-    for _ in range(20):
-        gp3._probe["samples"].append(0.0)
-    gp3.probe_tick()
-    ck("全零样本判 no_data", gp3._probe["verdict"] == "no_data")
+    gp.data["apps"]["legacygame.exe"] = {"mode": "igpu", "src": "probe",
+                                         "util": 42.0, "verdict": "ok"}
+    ck("历史 probe 条目仍判核显", gp.classify("legacygame.exe")[0] == "igpu")
+    ck("来源如实标 probe", gp.classify("legacygame.exe")[1] == "probe")
 
 
 def test_restore_all():
@@ -175,8 +133,9 @@ def test_disabled():
 def test_report_shape():
     gp, _ = mk(tier=2)
     r = gp.report()
-    for k in ("enabled", "igpu_tier", "managed", "n_igpu", "note", "probe"):
+    for k in ("enabled", "igpu_tier", "managed", "n_igpu", "note"):
         ck("report 含字段 %s" % k, k in r)
+    ck("试探已退场：report 不再有 probe", "probe" not in r)
 
 
 
@@ -210,9 +169,7 @@ def main():
     test_apply_and_orig()
     test_restore_keeps_original()
     test_user_override()
-    test_probe_ok()
-    test_probe_hard()
-    test_probe_marginal_and_nodata()
+    test_legacy_probe_entry()
     test_restore_all()
     test_disabled()
     test_pick_target_panel_focus()
