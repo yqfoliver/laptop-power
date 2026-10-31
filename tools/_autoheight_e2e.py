@@ -72,11 +72,11 @@ CARE_WORST = {
 
 GPU_WORST = {
     "enabled": True, "igpu_tier": 3, "managed": 2, "n_igpu": 2, "note": "",
-    "probe": None,
     "current": {"process": "League of Legends.exe",
                 "path": "C:\\Riot Games\\League of Legends\\League of Legends.exe",
                 "mode": "igpu", "src": "builtin", "note": "英雄联盟",
-                "tier": 2, "managed": True},
+                "tier": 2, "managed": True,
+                "now": {"which": "dgpu", "why": "busy"}},
 }
 
 STATUS = {
@@ -148,7 +148,8 @@ SHORT_STATUS = {
             "perf_label": "全速"},
     "load": {"cpu": 28, "disk": 5, "net": 24, "gpu": None},
     "gpupick": {"enabled": True, "current": {"process": "explorer.exe",
-               "mode": "dgpu", "src": "builtin"}},
+               "mode": "dgpu", "src": "builtin",
+               "now": {"which": "igpu", "why": "idle"}}},
 }
 
 

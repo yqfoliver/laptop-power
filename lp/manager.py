@@ -1753,6 +1753,36 @@ class Manager:
             pass
         return getattr(self, "current", None) == "gaming"
 
+    def _gpu_now(self) -> dict:
+        """面板展示用：现在实际在出力的是哪块显卡。
+
+        与 `_dgpu_busy` 同源但用途不同 —— 那个是「能不能断独显」的闸门
+        （游戏档一律算忙），这个是「现在到底谁在跑」的读数，所以不掺档位
+        判断，只看独显的真实利用率/功耗。独显被断电（eco=1）是最硬的事实：
+        此时它已从 PnP 消失，利用率根本读不到。
+        两样都读不到时返回空 which，前端显示「—」——不猜。
+        """
+        try:
+            if int(self.gpu_eco.read() or 0) == 1:
+                return {"which": "igpu", "why": "off"}
+        except Exception:
+            pass
+        p: dict = {}
+        try:
+            p = self._power_snap(max_age=20.0) or {}
+        except Exception:
+            p = {}
+        u, w = p.get("gpu_util"), p.get("gpu_w")
+        if u is None and w is None:
+            return {"which": "", "why": "nodata"}
+        try:
+            busy = ((u is not None and float(u) >= 3.0)
+                    or (w is not None and float(w) >= 10.0))
+        except Exception:
+            busy = False
+        return {"which": "dgpu" if busy else "igpu",
+                "why": "busy" if busy else "idle"}
+
     def _gpu_eco_tick(self, st: dict) -> None:
         """离电时把独显 ACPI 断电（借鉴 GHelper GPU Eco），插电还原。
 
@@ -1868,12 +1898,6 @@ class Manager:
         except Exception:
             return
         name = (fg or {}).get("process", "")
-        # 试探进行中：先跟上 pid（程序重启后 pid 会变），再采一个样本
-        if gp._probe and not gp._probe["done"]:
-            if name == gp._probe["exe_name"] and fg.get("pid"):
-                gp._probe["pid"] = fg["pid"]
-            gp.probe_tick()
-            return                      # 试探期间不再做常规应用，免得互相打架
         if not gp.enabled or not name:
             return
         if getattr(self, "current", None) == "balanced":
@@ -1937,6 +1961,8 @@ class Manager:
             "managed": bool(path) and path in self.gpupick.data.get("orig", {}),
             # 面板当前台 ⇒ 显示的是"上一个真实前台程序"，UI 要如实说清楚
             "stale": t["stale"],
+            # 现在实际在出力的是哪块 GPU（与「下次启动生效」的偏好无关）
+            "now": self._gpu_now(),
         }
         return r
 
@@ -2032,26 +2058,6 @@ class Manager:
         return {"ok": False, "elevating": False,
                 "msg": (w.get("reason") or "写入失败") +
                        "。可去 MyASUS → 设备设置 → 电池健康充电 手动切换"}
-
-    def gpupick_probe_start(self, seconds: float = 45.0) -> dict:
-        """对当前前台程序发起「试试核显」试探。"""
-        try:
-            t = self._gp_target()
-            path, name, pid = t["path"], t["process"], t["pid"]
-            if not path:
-                self.gpupick._last_note = "拿不到前台程序路径"
-            else:
-                self.gpupick.probe_start(path, name, pid, seconds)
-        except Exception as e:
-            self.gpupick._last_note = "试探启动失败：%r" % e
-        return self.gpupick_report()
-
-    def gpupick_probe_cancel(self) -> dict:
-        try:
-            self.gpupick.probe_cancel()
-        except Exception:
-            pass
-        return self.gpupick_report()
 
     def gpupick_restore_all(self) -> dict:
         """一键把所有被本模块改过的条目还原成原值。"""

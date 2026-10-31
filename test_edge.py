@@ -277,5 +277,31 @@ import inspect
 ok("scheme_label(" in inspect.getsource(_mgr.Manager.status),
    "status().scheme_name 已改走 scheme_label")
 
+# ---------------------------------------------------------------- 8. 当前 GPU 读数
+print("== 8. _gpu_now：面板上的「当前核显/独显」不能瞎猜 ==")
+
+
+def _now_with(eco, snap):
+    """绕过 Manager 构造（会碰硬件），只喂 _gpu_now 依赖的两样东西。"""
+    m = _mgr.Manager.__new__(_mgr.Manager)
+    m.gpu_eco = type("E", (), {"read": staticmethod(lambda: eco)})()
+    m._power_snap = lambda max_age=20.0: snap
+    return _mgr.Manager._gpu_now(m)
+
+
+ok(_now_with(1, {"gpu_util": 80, "gpu_w": 60})["which"] == "igpu",
+   "独显断电时永远是核显（利用率读数此刻根本不可信）")
+ok(_now_with(0, {"gpu_util": 12, "gpu_w": 3})["which"] == "dgpu",
+   "独显利用率 ≥3% 判独显在出力")
+ok(_now_with(0, {"gpu_util": 0, "gpu_w": 25})["which"] == "dgpu",
+   "利用率为 0 但功耗 ≥10W 也算独显在跑（刚渲染完/异步计算）")
+ok(_now_with(0, {"gpu_util": 0, "gpu_w": 2})["which"] == "igpu",
+   "独显空转（功耗 2W）判核显输出")
+ok(_now_with(0, {})["which"] == "",
+   "两样都读不到 → 空（前端显示「—」，不猜）")
+ok(_now_with("bad", {})["which"] == "",
+   "eco 读数坏掉也不炸（异常吞在内部，降级为读不到）")
+
+
 print("\n通过 %d，失败 %d" % (PASS, FAIL))
 raise SystemExit(1 if FAIL else 0)

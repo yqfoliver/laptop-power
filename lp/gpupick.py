@@ -40,7 +40,9 @@ GpuPreference=1，说明通道在本机是活的。
   本来就有设置，删掉是把别人的东西弄丢）。
 · 名单外的程序**一律不干预**（不写任何值），不做自动试探 —— 拿用户正在玩
   的游戏赌帧率是越界行为。
-· 探针采样只在手动试探期间开，结束即关闭 PDH 查询，常驻零开销。
+· 曾经的「手动试探」（临时设核显 + 采样 45 秒再固化）已于 2026-10-31 整体
+  退役：它和手动的「用核显 / 用独显」在界面上一模一样，用户分不清差别。
+  历史数据里 source 为 "probe" 的条目仍然照常生效（classify 保留该分支）。
 """
 from __future__ import annotations
 
@@ -136,12 +138,6 @@ DGPU_ONLY: Dict[str, str] = {
     "darksoulsiii.exe": "黑暗之魂 3",
 }
 
-# 试探判定阈值（核显 3D 利用率，%）
-PROBE_OK_P90 = 75.0       # 低于此值：核显游刃有余
-PROBE_HARD_P90 = 92.0     # 高于此值：核显吃满
-PROBE_MIN_SAMPLES = 10    # 有效样本不足不下结论
-PROBE_ACTIVE_UTIL = 1.0   # 低于此值视为「没在用 GPU」，不计入有效样本
-
 
 def _data_path() -> str:
     if getattr(sys, "frozen", False):
@@ -185,15 +181,13 @@ def pick_target(fg: Optional[dict], last_fg: Optional[dict]) -> dict:
 class GpuPick:
     """核显优先调度器。注册表与 PDH 均可注入（测试用假通道）。"""
 
-    def __init__(self, reg=None, probe=None, path=None) -> None:
+    def __init__(self, reg=None, path=None) -> None:
         self.reg = reg                    # 假注册表（测试注入）
-        self.probe = probe                # 假利用率探针（测试注入）
         self.enabled = True               # config: gpupick_enabled
         self.igpu_tier = 2                # config: gpupick_igpu_tier（本机核显档位）
         self.path = path or _data_path()
         self.data: dict = {"version": 1, "apps": {}, "orig": {}}
         self._last_note = ""
-        self._probe: Optional[dict] = None
         self._load()
 
     # ------------------------------------------------------------ 持久化
@@ -380,107 +374,8 @@ class GpuPick:
             return None
         return None
 
-    # ------------------------------------------------------------ 试探
-    def probe_start(self, exe_path: str, exe_name: str, pid: Optional[int],
-                    seconds: float = 45.0) -> bool:
-        """把一个程序临时设成核显并采样利用率。需重启该程序才生效。"""
-        if not exe_path:
-            self._last_note = "拿不到程序路径"
-            return False
-        self.reg_set(exe_path, PREF_IGPU)
-        self._probe = {
-            "exe_path": exe_path,
-            "exe_name": self.norm(exe_name),
-            "pid": pid,
-            "t0": time.time(),
-            "seconds": float(seconds),
-            "samples": [],
-            "done": False,
-            "verdict": "",
-        }
-        self._last_note = "已设为核显，重启该程序后开始采样"
-        return True
-
-    def probe_tick(self) -> None:
-        """每轮巡检调用一次：采一个样本，够了就下结论。"""
-        p = self._probe
-        if not p or p["done"]:
-            return
-        if time.time() - p["t0"] > p["seconds"] + 30:
-            self._probe_finish()
-            return
-        u = self.util_for_pid(p["pid"]) if p["pid"] else None
-        if u is not None:
-            p["samples"].append(round(u, 1))
-        if len(p["samples"]) and (time.time() - p["t0"]) >= p["seconds"]:
-            self._probe_finish()
-
-    def _probe_finish(self) -> None:
-        p = self._probe
-        if not p:
-            return
-        vals = [v for v in p["samples"] if v >= PROBE_ACTIVE_UTIL]
-        p["done"] = True
-        if len(vals) < PROBE_MIN_SAMPLES:
-            p["verdict"] = "no_data"
-            self._last_note = "没采到有效样本（程序可能没在跑，或没用到 GPU）"
-            return
-        sv = sorted(vals)
-        p90 = sv[min(len(sv) - 1, int(len(sv) * 0.9))]
-        p["p90"] = p90
-        if p90 < PROBE_OK_P90:
-            verdict = "ok"
-            mode = "igpu"
-        elif p90 >= PROBE_HARD_P90:
-            verdict = "hard"
-            mode = "dgpu"
-        else:
-            verdict = "marginal"
-            mode = "igpu"
-        p["verdict"] = verdict
-        self.data["apps"][p["exe_name"]] = {
-            "mode": mode, "src": "probe", "util": round(p90, 1),
-            "verdict": verdict, "ts": time.time(),
-        }
-        if verdict == "hard":
-            self.reg_restore(p["exe_path"])   # 吃力：还原成原值，别硬撑
-        self._save()
-        note = {"ok": "核显游刃有余（占用 %.0f%%）",
-                "marginal": "核显勉强够（占用 %.0f%%）",
-                "hard": "核显吃力（占用 %.0f%%），已退回独显"}[verdict]
-        self._last_note = note % p90
-
-    def probe_cancel(self) -> None:
-        p = self._probe
-        if not p:
-            return
-        self.reg_restore(p["exe_path"])
-        self._probe = None
-        self._last_note = "已取消试探并还原"
-
-    def util_for_pid(self, pid: Optional[int]) -> Optional[float]:
-        """按 pid 读 GPU 3D 利用率（取所有显卡实例中的最大值）。"""
-        if pid is None:
-            return None
-        if self.probe is not None:
-            return self.probe(pid)
-        return _pdh_util_for_pid(pid)
-
     # ------------------------------------------------------------ 状态
     def report(self) -> dict:
-        p = self._probe
-        pr = None
-        if p:
-            pr = {
-                "running": not p["done"],
-                "exe_name": p["exe_name"],
-                "elapsed": round(time.time() - p["t0"], 1),
-                "total": round(p["seconds"], 1),
-                "samples": len(p["samples"]),
-                "last": p["samples"][-1] if p["samples"] else None,
-                "verdict": p.get("verdict", ""),
-                "p90": p.get("p90"),
-            }
         # list() 快照：巡检线程可能在 apply_for 里插入新条目，直接遍历
         # dict.values() 会让面板线程偶发 RuntimeError（界面表现为「调度未启用」）
         apps = list(self.data["apps"].values())
@@ -491,68 +386,7 @@ class GpuPick:
             "managed": len(self.data["orig"]),
             "n_igpu": n_igpu,
             "note": self._last_note,
-            "probe": pr,
         }
-
-
-# ---------------------------------------------------------------------------
-# PDH：按 pid 的 GPU 3D 利用率
-# ---------------------------------------------------------------------------
-def _pdh_instances_for_pid(pid: int) -> List[str]:
-    try:
-        import win32pdh  # type: ignore
-    except Exception:
-        return []
-    try:
-        items = win32pdh.EnumObjectItems(None, None, "GPU Engine", -1)
-        insts = items[-1] if items else []
-    except Exception:
-        return []
-    tag = "pid_%d_" % int(pid)
-    return [s for s in insts if s.startswith(tag) and "engtype_3D" in s]
-
-
-def _pdh_util_for_pid(pid: int) -> Optional[float]:
-    """单次采样：PDH 计数器首值无效，故采两次取第二次。"""
-    try:
-        import win32pdh  # type: ignore
-    except Exception:
-        return None
-    insts = _pdh_instances_for_pid(pid)
-    if not insts:
-        return None
-    q = None
-    try:
-        q = win32pdh.OpenQuery()
-        hs = []
-        for s in insts[:8]:
-            try:
-                path = win32pdh.MakeCounterPath(
-                    (None, "GPU Engine", s, None, -1, "Utilization Percentage"))
-                hs.append(win32pdh.AddCounter(q, path))
-            except Exception:
-                pass
-        if not hs:
-            return None
-        win32pdh.CollectQueryData(q)
-        time.sleep(0.35)
-        win32pdh.CollectQueryData(q)
-        best = 0.0
-        for h in hs:
-            try:
-                v = win32pdh.GetFormattedCounterValue(h, win32pdh.PDH_FMT_DOUBLE)[1]
-                best = max(best, float(v))
-            except Exception:
-                pass
-        return best
-    except Exception:
-        return None
-    finally:
-        if q is not None:
-            try:
-                win32pdh.CloseQuery(q)
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------

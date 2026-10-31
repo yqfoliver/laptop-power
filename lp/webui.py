@@ -354,14 +354,6 @@ class Handler(BaseHTTPRequestHandler):
             mode = str((data or {}).get("mode") or "").lower()
             mode = mode if mode in ("igpu", "dgpu") else None
             self._json(200, mgr.gpupick_set((data or {}).get("process") or None, mode))
-        elif path == "/api/gpupick_probe":
-            try:
-                secs = float((data or {}).get("seconds") or 45)
-            except Exception:
-                secs = 45.0
-            self._json(200, mgr.gpupick_probe_start(max(10.0, min(120.0, secs))))
-        elif path == "/api/gpupick_probe_cancel":
-            self._json(200, mgr.gpupick_probe_cancel())
         elif path == "/api/gpupick_restore_all":
             self._json(200, mgr.gpupick_restore_all())
         elif path == "/api/charge_limit":

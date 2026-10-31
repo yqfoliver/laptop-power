@@ -207,13 +207,14 @@
   <div class="cols">
   <div class="col">
   <div class="card" id="gpCard">
-    <div class="ct"><span class="t">核显优先</span><span class="r" id="gpVerdict" style="color:var(--muted)">—</span></div>
+    <div class="ct"><span class="t">核显优先</span>
+      <span class="r"><span id="gpNow" style="color:var(--muted)">当前 —</span><span
+        id="gpVerdict" style="color:var(--muted);margin-left:7px">—</span></span></div>
     <div class="hint" id="gpLine">—</div>
     <div class="fanbtns">
       <button class="btn" id="gpIgpu">用核显</button>
       <button class="btn" id="gpDgpu">用独显</button>
       <button class="btn" id="gpAuto">交回系统</button>
-      <button class="btn" id="gpProbe">试试核显</button>
     </div>
   </div>
   </div>
@@ -683,6 +684,14 @@ function renderGpuPick(){
   const cur = g.current || {};
   const v = document.getElementById("gpVerdict");
   const line = document.getElementById("gpLine");
+  // 当前实际在出力的是哪块 GPU。和右边的判定分开显示：判定说的是「下次启动
+  // 走哪块」，这两件事经常不一样（手动钉了核显，但程序没重启仍是独显在跑）。
+  // 放在所有 return 之前 —— 调度关闭、无前台程序等状态下，这条读数一样要有。
+  const now = cur.now || {};
+  const nowEl = document.getElementById("gpNow");
+  nowEl.textContent = ({dgpu:"当前独显", igpu:"当前核显"})[now.which] || "当前 —";
+  nowEl.style.color = now.which === "dgpu" ? "var(--amber)"
+    : now.which === "igpu" ? "var(--green)" : "var(--muted)";
   // 自动判定为主：手动按钮只在「自动说了不算」或「有手动设定要撤销」时出现。
   // 提示一律并进原有的那行 hint —— 面板总高是校准过的，多一行就会溢出滚动条。
   const show = (el, on)=>{ if(el) el.style.display = on ? "" : "none"; };
@@ -691,22 +700,12 @@ function renderGpuPick(){
   show(document.getElementById("gpIgpu"), !!cur.process && (unknown || pinned || cur.src==="user"));
   show(document.getElementById("gpDgpu"), !!cur.process && (unknown || pinned || cur.src==="user"));
   show(document.getElementById("gpAuto"), pinned);
-  show(document.getElementById("gpProbe"), unknown && !!cur.path);
   const extra = [];
   // 「名单外，自动不干预」不再进 extra——上一行的 src 已经写着「名单外」，
   // 重复一遍只是把括号撑长（2026-10-20 UI 精简）。面板当前台的提示保留：
   // 它解释「按钮点了为什么没反应」。
   if(cur.stale && cur.process) extra.push("面板当前台，操作对象是上一个程序");
   window.__gpExtra = extra.length ? ("（" + extra.join(" · ") + "）") : "";
-  const pr = g.probe;
-  if(pr && pr.running){
-    v.textContent = "试探中 " + Math.round(pr.elapsed) + "/" + Math.round(pr.total) + "s";
-    v.style.color = "var(--amber)";
-    line.textContent = "已设为核显 —— 重启 " + (pr.exe_name||"该程序") +
-      " 后开始采样（样本 " + pr.samples + " · 当前 " +
-      (pr.last==null ? "—" : Math.round(pr.last)+"%") + "）";
-    return;
-  }
   if(!g.enabled){
     // 2026-10-25 事故：调度未启用时按钮仍显示，点击在后端生效、界面却永远
     // 停在「未启用」—— 用户看到的就是「点了没反应」。未启用就藏掉按钮，
@@ -715,19 +714,10 @@ function renderGpuPick(){
     show(document.getElementById("gpIgpu"), false);
     show(document.getElementById("gpDgpu"), false);
     show(document.getElementById("gpAuto"), false);
-    show(document.getElementById("gpProbe"), false);
     line.textContent = (cur.process && cur.src === "user")
       ? ("调度未启用 · " + cur.process + " 已手动钉「" +
          (cur.mode === "dgpu" ? "走独显" : "走核显") + "」")
       : "核显优先调度未启用";
-    return;
-  }
-  if(pr && pr.verdict){
-    const m = {ok:"核显游刃有余，已固化", marginal:"核显勉强够，先留着",
-               hard:"核显吃力，已退回独显", no_data:"没采到有效样本"};
-    v.textContent = "试探结束"; v.style.color = "var(--muted)";
-    line.textContent = (m[pr.verdict]||pr.verdict) +
-      (pr.p90!=null ? ("（核显占用 " + Math.round(pr.p90) + "%）") : "");
     return;
   }
   const mm = {igpu:"走核显", dgpu:"走独显"};
@@ -749,12 +739,6 @@ async function gpSet(m){
 document.getElementById("gpIgpu").onclick = ()=>gpSet("igpu");
 document.getElementById("gpDgpu").onclick = ()=>gpSet("dgpu");
 document.getElementById("gpAuto").onclick = ()=>gpSet("");
-document.getElementById("gpProbe").onclick = async ()=>{
-  try{ await post("/api/gpupick_probe",{seconds:45}); }
-  catch(e){ document.getElementById("gpLine").textContent = "试探启动失败：" + ((e&&e.message)||e); }
-  tick();
-};
-
 tick();
 setInterval(tick, 2000);
 

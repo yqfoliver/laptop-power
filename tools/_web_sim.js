@@ -193,6 +193,7 @@ const epilogue = `
   renderThermal: renderThermal,
   renderModes: renderModes,
   renderLoad: renderLoad,
+  renderGpuPick: renderGpuPick,
   tick: tick,
   chgSet: chgSet,
   fmtDur: fmtDur,
@@ -281,6 +282,44 @@ T.renderLoad();
 ok(/已保护/.test(el("loadDetail").textContent), "重负载保护标记保留",
    el("loadDetail").textContent);
 ok(el("loadDetail").style.color !== "", "重负载明细行变色提示", el("loadDetail").style.color);
+
+/* ------------------------------------------------------------ 1c. 当前 GPU 读数 */
+console.log("\n== 1c. 核显优先卡显示「当前用的是哪块 GPU」==");
+function gpPayload(nowWhich, extra) {
+  return basePayload({
+    gpupick: { enabled: true, current: Object.assign({
+      process: "code.exe", path: "C:\\x\\code.exe", mode: null,
+      src: "builtin", note: "", managed: false, stale: false,
+      now: { which: nowWhich, why: "" },
+    }, extra || {}) },
+  });
+}
+ok(el("gpNow") !== null, "标题右侧有「当前 GPU」读数位");
+load(gpPayload("dgpu"));
+T.renderGpuPick();
+ok(el("gpNow").textContent === "当前独显", "独显在跑时显示「当前独显」",
+   el("gpNow").textContent);
+ok(el("gpNow").style.color === "var(--amber)", "独显用告警色（它在耗电）",
+   el("gpNow").style.color);
+load(gpPayload("igpu"));
+T.renderGpuPick();
+ok(el("gpNow").textContent === "当前核显", "核显在跑时显示「当前核显」",
+   el("gpNow").textContent);
+ok(el("gpNow").style.color === "var(--green)", "核显用绿色", el("gpNow").style.color);
+load(gpPayload(""));
+T.renderGpuPick();
+ok(el("gpNow").textContent === "当前 —", "读不到时显示「—」而不是猜一个",
+   el("gpNow").textContent);
+// 关调度时这条读数也要在（用户仍想知道现在谁在跑）
+T.setState({ gpupick: { enabled: false, current: {
+  process: "code.exe", path: "C:////x////code.exe", mode: null, src: "builtin",
+  note: "", managed: false, stale: false, now: { which: "igpu", why: "off" } } } });
+T.renderGpuPick();
+ok(el("gpNow").textContent === "当前核显", "调度关闭时读数照常显示",
+   el("gpNow").textContent);
+// 「试试核显」已退场：按钮必须真的不在
+ok(!/id="gpProbe"/.test(html), "「试试核显」按钮已删除");
+ok(el("gpIgpu") !== null && el("gpDgpu") !== null, "手动「用核显/用独显」还在");
 
 /* ------------------------------------------------------------ 2. 按钮真的会发请求 */
 console.log("\n== 2. 按钮点击真的发出 POST ==");
