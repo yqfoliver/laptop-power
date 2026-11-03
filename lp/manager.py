@@ -23,6 +23,7 @@ from .batterycare import BatteryCare
 from .brightness import BrightnessCtl
 from .clamshell import ClamshellCtl
 from .display import DisplayCtl
+from .fancurve import FanCurve
 from .learner import Learner
 from .nvmlctl import Nvml, PM_MAXIMUM, PM_MINIMUM
 from .pdbudget import PdBudget
@@ -180,6 +181,11 @@ class Manager:
         self.thermal.scheme = cfg.get("custom_scheme") or None
         self._thermal_at = 0.0
         self._thermal_note = ""
+        # 软件风扇曲线（对标 Armoury Crate 手动模式）：固件的曲线设备写不动
+        # （写入返回 True 但回读不变），所以曲线存在本地、由我们按温度插值后
+        # 写 cpu_fan 档位。接管期间 EC 曲线不生效 ⇒ 内置启动收尾/看门狗/下限钳制。
+        self.fancurve = FanCurve(cfg, data_path=os.path.join(APP_ROOT, "fan_curve.json"),
+                                 watchdog=True)
         # 合盖不休眠（对标 GHelper ClamshellModeControl）：外接屏 + 插电时
         # 把自建计划的 LIDACTION 临时改成 0（不动作），条件不满足即还原。
         self.clamshell = ClamshellCtl(cfg, cfg.get("custom_scheme") or None,
@@ -1263,6 +1269,7 @@ class Manager:
         self._care_tick(st, info)
         self._pd_tick(st, info)
         self._thermal_tick()
+        self._fancurve_tick()
         self._clamshell_tick(st)
         self._gpu_eco_tick(st)
         self._gpupick_tick(st)
@@ -2127,6 +2134,47 @@ class Manager:
                 pass
         self._emit()
         return {"ok": True, "report": self.clamshell_report()}
+
+    # -------------------------------------------------------- 软件风扇曲线
+    def _fancurve_tick(self) -> None:
+        """每拍把曲线算出的目标转速写给 EC（未启用时是空转）。"""
+        try:
+            self.fancurve.tick()
+        except Exception as _e:
+            self._err("fancurve.tick", _e)
+
+    def fancurve_state(self) -> dict:
+        try:
+            return self.fancurve.state()
+        except Exception as e:                      # noqa: BLE001
+            return {"available": False, "error": str(e)}
+
+    def fancurve_set(self, enabled=None, temps=None, fans=None) -> dict:
+        """面板入口：保存曲线 / 启停接管。任一参数为 None 表示不改。"""
+        if temps is not None or fans is not None:
+            r = self.fancurve.set_curve(temps, fans)
+            if not r.get("ok"):
+                return r
+        if enabled is not None:
+            self.fancurve.set_enabled(bool(enabled))
+            try:
+                config.save(self.cfg)
+            except Exception:
+                pass
+        # 立刻跑一拍：面板点了「启用」就能马上看到接管结果，不等下一轮巡检
+        try:
+            self.fancurve.tick()
+        except Exception:
+            pass
+        return {"ok": True, "state": self.fancurve.state()}
+
+    def fancurve_reset(self) -> dict:
+        self.fancurve.reset_curve()
+        try:
+            self.fancurve.tick()
+        except Exception:
+            pass
+        return {"ok": True, "state": self.fancurve.state()}
 
     # -------------------------------------------------------- 散热策略
     def _thermal_tick(self) -> None:

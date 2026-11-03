@@ -840,6 +840,10 @@ def _pump():
 
         _bounded("thermal.hw_restore", m.thermal.hw_restore, 8.0)
 
+        # 风扇曲线接管（写 cpu_fan 手动模式）必须交回自动 —— 否则退出后风扇
+        # 会停在最后一次的转速（EC 曲线不再参与），用户听到的就是「一直很吵」。
+        _bounded("fancurve.release", m.fancurve.stop, 6.0)
+
         # 刷新率（2026-10-06 补）：离电降刷是 refresh_on_battery 的常驻策略，
         # 不随档位切换还原，以前退出时漏了这一项 —— 结果用户退出程序后屏幕
         # 一直停在 60Hz（插电后也不会自己回去），会被当成"屏幕坏了"。

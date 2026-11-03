@@ -194,6 +194,10 @@ const epilogue = `
   renderModes: renderModes,
   renderLoad: renderLoad,
   renderGpuPick: renderGpuPick,
+  renderFanCurve: renderFanCurve,
+  fcApplyPoint: fcApplyPoint,
+  fcLoad: fcLoad,
+  fcState: function(){ return { curve: fcCurve, data: fcData }; },
   tick: tick,
   chgSet: chgSet,
   fmtDur: fmtDur,
@@ -240,6 +244,20 @@ function basePayload(over) {
     },
   };
   return Object.assign(p, over || {});
+}
+
+/* 风扇曲线夹具：8 点曲线 + 未接管状态（/api/fancurve 的真实形状） */
+function fcPayload(over) {
+  const temps = [35, 45, 55, 65, 75, 82, 90, 98];
+  const fans = [30, 30, 38, 50, 65, 80, 92, 100];
+  const st = {
+    available: true, supported: true, enabled: false, manual: false, min_pct: 30,
+    curve: { temps: temps.slice(), fans: fans.slice() },
+    factory: { temps: temps.slice(), fans: fans.slice() },
+    fan_now: 33, fan_tag: 1, cpu_temp: 55, last_pct: null, note: "",
+    gpu_note: "GPU 风扇仍由 EC 自动控制（本版不接管）",
+  };
+  return Object.assign(st, over || {});
 }
 
 function load(p) {
@@ -444,8 +462,77 @@ function next3() {
   }).then(() => {
     ok(!/未连接/.test(el("fg").textContent), "恢复后提示消失（自愈）", el("fg").textContent);
     ok(el("fg").style.color === "", "颜色复位", el("fg").style.color);
-    next4();
-  }).catch((e) => { ok(false, "断连测试抛异常：" + e); next4(); });
+    nextFan();
+  }).catch((e) => { ok(false, "断连测试抛异常：" + e); nextFan(); });
+}
+
+/* ------------------------------------------------------------ 10b. 风扇曲线 */
+function nextFan() {
+  console.log("\n== 10b. 风扇曲线：8 点 / 拖动夹取 / 保存并接管 / 交回 ==");
+  net.calls.length = 0;
+  net.payload = basePayload({
+    __routes: {
+      "/api/fancurve": fcPayload(),
+      "/api/fancurve_set": { ok: true, state: fcPayload({ enabled: true, manual: true,
+                                                          fan_now: 44 }) },
+      "/api/fancurve_reset": { ok: true, state: fcPayload() },
+    },
+  });
+  return Promise.resolve(T.fcLoad())
+    .then(() => new Promise((r) => setImmediate(r)))
+    .then(() => {
+      ok(/未启用/.test(el("fcState").textContent), "未接管时状态为未启用",
+         el("fcState").textContent);
+      ok((el("fcSvg").innerHTML.match(/<circle/g) || []).length === 8,
+         "画出了 8 个可拖点");
+      ok((el("fcSvg").innerHTML.match(/<polyline/g) || []).length === 1,
+         "折线只画一条");
+      const st = T.fcState();
+      ok(st.curve.temps.length === 8 && st.curve.fans.length === 8, "曲线 8 点齐备");
+
+      // 拖动：把第 4 个点抬到 90% —— 但它右邻点是 65%，单调约束会夹住
+      T.fcApplyPoint(3, 63, 90);
+      ok(T.fcState().curve.fans[3] === 65, "转速被右邻点夹住（不能高于后一个点）",
+         T.fcState().curve.fans);
+      // 温度不能越过右邻点（75）—— 拖到 80 应被夹到 74
+      T.fcApplyPoint(3, 80, 90);
+      ok(T.fcState().curve.temps[3] === 74, "温度被夹在相邻点之间",
+         T.fcState().curve.temps);
+      // 转速不能低于左邻点（38）
+      T.fcApplyPoint(3, 63, 1);
+      ok(T.fcState().curve.fans[3] === 38, "转速不低于左邻点", T.fcState().curve.fans);
+
+      return el("fcApply").onclick();
+    })
+    .then(() => new Promise((r) => setImmediate(r)))
+    .then(() => {
+      const posts = net.calls.filter((c) => c.url === "/api/fancurve_set");
+      ok(posts.length === 1, "保存发出一次 fancurve_set", net.calls.map((c) => c.url));
+      const body = JSON.parse(posts[0].opt.body);
+      ok(body.enabled === true, "保存时带上 enabled=true");
+      ok(body.temps.length === 8 && body.fans.length === 8, "载荷是完整 8 点",
+         body.temps);
+      ok(/已保存并接管/.test(el("fcLine").textContent), "回执写明已接管",
+         el("fcLine").textContent);
+      ok(/接管中/.test(el("fcState").textContent), "状态切到接管中",
+         el("fcState").textContent);
+      return el("fcOff").onclick();
+    })
+    .then(() => new Promise((r) => setImmediate(r)))
+    .then(() => {
+      const off = net.calls.filter((c) => c.url === "/api/fancurve_set")[1];
+      ok(off && JSON.parse(off.opt.body).enabled === false, "交回自动发 enabled=false");
+      ok(/已交回/.test(el("fcLine").textContent), "交回有回执", el("fcLine").textContent);
+      return el("fcReset").onclick();
+    })
+    .then(() => new Promise((r) => setImmediate(r)))
+    .then(() => {
+      ok(net.calls.some((c) => c.url === "/api/fancurve_reset"), "恢复原厂发了请求");
+      ok(/恢复出厂/.test(el("fcLine").textContent), "恢复原厂有回执",
+         el("fcLine").textContent);
+      next4();
+    })
+    .catch((e) => { ok(false, "风扇曲线测试抛异常：" + e); next4(); });
 }
 
 /* ------------------------------------------------------------ 11. 静态一致性 */

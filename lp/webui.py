@@ -202,6 +202,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, out)
             except Exception as e:
                 self._json(200, {"error": str(e)})
+        elif path == "/api/fancurve":
+            self._json(200, mgr.fancurve_state())
         else:
             self._json(404, {"error": "no route"})
 
@@ -364,6 +366,22 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 reason = str((data or {}).get("reason") or "manual")
                 self._json(200, mgr.charge_limit_set(act, reason))
+        elif path == "/api/fancurve_set":
+            # 曲线是「8 点温度 + 8 点转速」；写入前由 FanCurve.validate 兜底，
+            # 非法曲线直接 400，绝不把坏值写进风扇。
+            payload = data or {}
+            temps = payload.get("temps")
+            fans = payload.get("fans")
+            enabled = payload.get("enabled")
+            if temps is not None and (not isinstance(temps, list) or len(temps) != 8):
+                self._json(400, {"ok": False, "error": "temps 必须是 8 个数"})
+            elif fans is not None and (not isinstance(fans, list) or len(fans) != 8):
+                self._json(400, {"ok": False, "error": "fans 必须是 8 个数"})
+            else:
+                r = mgr.fancurve_set(enabled=enabled, temps=temps, fans=fans)
+                self._json(200 if r.get("ok") else 400, r)
+        elif path == "/api/fancurve_reset":
+            self._json(200, mgr.fancurve_reset())
         elif path == "/api/thermal_set":
             mode = str((data or {}).get("mode") or "").lower()
             if mode not in ("auto", "quiet", "perf"):
