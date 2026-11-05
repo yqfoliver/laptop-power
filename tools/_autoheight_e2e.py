@@ -153,28 +153,8 @@ SHORT_STATUS = {
 }
 
 
-FANCURVE = {
-    "available": True, "supported": True, "enabled": False, "manual": False,
-    "min_pct": 30,
-    "curve": {"temps": [35, 45, 55, 65, 75, 82, 90, 98],
-              "fans": [30, 30, 38, 50, 65, 80, 92, 100]},
-    "factory": {"temps": [35, 45, 55, 65, 75, 82, 90, 98],
-                "fans": [30, 30, 38, 50, 65, 80, 92, 100]},
-    "fan_now": 33, "fan_tag": 1, "cpu_temp": 55, "last_pct": None,
-    "note": "", "gpu_note": "GPU 风扇仍由 EC 自动控制（本版不接管）",
-}
-
-
 class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith("/api/fancurve"):
-            body = json.dumps(FANCURVE, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if self.path.startswith("/api/status"):
             # 页面固定轮询 /api/status（不带 query），short 场景只能靠
             # Referer 区分：Edge 同源 fetch 默认会带完整 Referer。

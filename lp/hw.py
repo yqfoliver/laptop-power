@@ -832,6 +832,28 @@ _DIAG_KEY = (winreg.HKEY_LOCAL_MACHINE,
 FAN_LABEL = {0: "平衡", 1: "增强", 2: "静音", 3: "全速", 4: "手动"}
 
 
+def fan_release_manual() -> bool:
+    """旧版「软件风扇曲线」遗留的手动模式收尾：EC tag=2 时写 0 交回自动。
+
+    该功能已于 2026-11-05 删除（散热交回 EC 自动），但装过旧版的机器可能把
+    cpu_fan 锁在最后写入的固定转速 —— 那时程序一退出风扇就会「一直很吵」。
+    启动时读一次，只做一次性释放，不参与轮询；读不到/非手动模式即返回 False。
+    """
+    try:
+        from . import atkacpi
+        a = atkacpi.get()
+        if a is None:
+            return False
+        buf = a.read_buf("cpu_fan", 0, 16)
+        if not buf or len(buf) < 4:
+            return False
+        if int.from_bytes(buf[2:4], "little") != 2:
+            return False
+        return bool(a.write_int("cpu_fan", 0))
+    except Exception:
+        return False
+
+
 def fan_status() -> dict:
     """读风扇/散热状态。优先 ATKACPI 直读，注册表镜像只作补充。
 

@@ -199,10 +199,6 @@ DEFAULT_CONFIG = {
     "thermal_perf_gpu_cpu_temp_c": 98,
     "thermal_perf_gpu_temp_c": 92,
     "thermal_atk_enabled": False,         # True 时 quiet→ATK 模式2 / perf→模式1
-    # 软件风扇曲线（2026-11-03）：固件曲线写不动，改成我们按曲线写 cpu_fan。
-    # 接管期间 EC 曲线不生效，所以下限是安全底线（压太低会过热/停转）。
-    "fan_curve_enabled": False,
-    "fan_curve_min_pct": 30,
     # 插电高温保护（与 care_heat_relief「充电高热」是两条独立触发线）
     "care_thermal_relief": True,
     "care_hot_cpu_c": 95,
@@ -304,8 +300,6 @@ _NUM_LIMITS = {
     "thermal_quiet_gpu_temp_c": (30.0, 120.0),
     "thermal_perf_gpu_cpu_temp_c": (30.0, 120.0),
     "thermal_perf_gpu_temp_c": (30.0, 120.0),
-    # 风扇曲线下限：低于 20% 在高温下压不住，高于 90% 等于常开全速
-    "fan_curve_min_pct": (20, 90),
     # 电池养护
     "care_full_soc_pct": (0, 100),
     "care_deep_soc_pct": (0, 100),
@@ -407,9 +401,12 @@ def _migrate(cfg: dict) -> None:
     # 2026-10-30：low_battery_percent / minimize_to_tray / battery_eco_percent
     # 三个键全项目没有任何读取点（面板却能改、改了什么都不发生）⇒ 一并退场。
     # battery_saver_percent 同日退场：「省电」档并入续航，判定不再读它。
+    # 2026-11-05：fan_curve_* 随「风扇曲线」整卡退场（散热交回 EC 自动 +
+    # 散热档三档）。旧 config.json 里的残留键一并清掉。
     for dead in ("manual", "pd_s4_gpu_off", "low_battery_percent",
                  "minimize_to_tray", "battery_eco_percent",
-                 "battery_saver_percent"):
+                 "battery_saver_percent", "fan_curve_enabled",
+                 "fan_curve_min_pct"):
         if dead in cfg and dead not in DEFAULT_CONFIG:
             cfg.pop(dead, None)
 

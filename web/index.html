@@ -78,13 +78,6 @@
   button.btn:disabled{opacity:.45;cursor:default}
   button.btn:disabled:hover{border-color:var(--border)}
 
-  /* 风扇曲线：8 点拖拽编辑器（横轴 30~100℃，纵轴 0~100% 转速） */
-  .fcsvg{display:block;width:100%;height:104px;background:var(--card2);
-         border:1px solid var(--border);border-radius:6px;cursor:crosshair;
-         touch-action:none;margin-top:2px}
-  .fclegend{display:flex;justify-content:space-between;font-size:10px;
-            color:var(--muted);margin-top:2px}
-
 </style>
 <script>
 /* ============ 多标签互斥：同一时刻只留一个面板标签，重复的自动关闭 ============ */
@@ -222,23 +215,6 @@
       <button class="btn" id="gpIgpu">用核显</button>
       <button class="btn" id="gpDgpu">用独显</button>
       <button class="btn" id="gpAuto">交回系统</button>
-    </div>
-  </div>
-  </div>
-  </div>
-
-  <div class="cols">
-  <div class="col">
-  <div class="card" id="fcCard">
-    <div class="ct"><span class="t">风扇曲线</span>
-      <span class="r"><span id="fcState" style="color:var(--muted)">—</span></span></div>
-    <div class="hint" id="fcLine">—</div>
-    <svg class="fcsvg" id="fcSvg" viewBox="0 0 600 104" preserveAspectRatio="none"></svg>
-    <div class="fclegend"><span>30℃</span><span>拖动圆点改曲线</span><span>100℃</span></div>
-    <div class="fanbtns">
-      <button class="btn" id="fcApply">保存并接管</button>
-      <button class="btn" id="fcOff">交回自动</button>
-      <button class="btn" id="fcReset">恢复原厂</button>
     </div>
   </div>
   </div>
@@ -764,186 +740,8 @@ document.getElementById("gpIgpu").onclick = ()=>gpSet("igpu");
 document.getElementById("gpDgpu").onclick = ()=>gpSet("dgpu");
 document.getElementById("gpAuto").onclick = ()=>gpSet("");
 
-/* ================= 风扇曲线：8 点拖拽，曲线存本地、由后台按温度写 cpu_fan ====
-   为什么不写固件曲线：ATKACPI 的曲线设备写入返回 True 但回读不变（空操作），
-   照它做编辑器就是「点了没反应」。所以曲线只存在我们程序里。            */
-let fcData = null;          // 最近一次 /api/fancurve 的返回
-let fcCurve = null;         // 编辑中的副本（未保存）
-let fcDrag = -1;            // 正在拖的点下标；-1 = 没在拖
-let fcMsg = "", fcMsgUntil = 0;
-const FC_T0 = 30, FC_T1 = 100, FC_PAD = 6;
-
-function fcGeom(){
-  const svg = document.getElementById("fcSvg");
-  const w = svg.clientWidth || 600;
-  const h = svg.clientHeight || 104;
-  return {w:w, h:h, x0:FC_PAD, y0:FC_PAD, iw:w-2*FC_PAD, ih:h-2*FC_PAD};
-}
-function fcXp(t, g){ return g.x0 + (t-FC_T0)/(FC_T1-FC_T0)*g.iw; }
-function fcYp(p, g){ return g.y0 + (1-p/100)*g.ih; }
-
-function fcTone(){
-  const d = fcData || {};
-  if(d.error) return "读取失败";
-  if(d.manual) return "接管中";
-  if(d.enabled) return "已启用";
-  return "未启用";
-}
-
-function renderFanCurve(){
-  const svg = document.getElementById("fcSvg");
-  const sEl = document.getElementById("fcState");
-  const line = document.getElementById("fcLine");
-  if(!svg || !sEl || !line) return;
-  sEl.textContent = fcTone() + (fcData && fcData.fan_now != null
-      ? (" · 当前 " + fcData.fan_now + "%") : "");
-  sEl.style.color = (fcData && fcData.manual) ? "var(--green)" : "var(--muted)";
-  if(fcMsg && Date.now() < fcMsgUntil){
-    line.textContent = fcMsg;
-    line.style.color = "var(--accent)";
-  }else{
-    line.textContent = (fcData && fcData.note) ||
-      "曲线存在本机：启用后按温度调速；交回自动即恢复 EC 曲线";
-    line.style.color = "var(--muted)";
-  }
-  if(!fcCurve || !fcCurve.temps){ svg.innerHTML = ""; return; }
-  const g = fcGeom();
-  let s = "";
-  for(let t=FC_T0; t<=FC_T1; t+=10){
-    const x = fcXp(t,g).toFixed(1);
-    s += '<line x1="'+x+'" y1="'+g.y0+'" x2="'+x+'" y2="'+(g.y0+g.ih)+
-         '" stroke="#33363C" stroke-width="1"/>';
-  }
-  for(let p=0; p<=100; p+=25){
-    const y = fcYp(p,g).toFixed(1);
-    s += '<line x1="'+g.x0+'" y1="'+y+'" x2="'+(g.x0+g.iw)+'" y2="'+y+
-         '" stroke="#33363C" stroke-width="1"/>';
-  }
-  const pts = fcCurve.temps.map(function(t,i){
-    return fcXp(t,g).toFixed(1) + "," + fcYp(fcCurve.fans[i],g).toFixed(1);
-  });
-  s += '<polyline points="'+pts.join(" ")+'" fill="none" stroke="#4C8DFF" stroke-width="1.8"/>';
-  fcCurve.temps.forEach(function(t,i){
-    s += '<circle cx="'+fcXp(t,g).toFixed(1)+'" cy="'+fcYp(fcCurve.fans[i],g).toFixed(1)+
-         '" r="3.6" fill="#4C8DFF" stroke="#18191C" stroke-width="1.2"/>';
-  });
-  svg.innerHTML = s;
-}
-
-/* 拖动：把第 i 个点挪到 (t, p)，夹在相邻点之间并守住量程 */
-function fcApplyPoint(i, t, p){
-  if(!fcCurve) return;
-  const T = fcCurve.temps, F = fcCurve.fans;
-  if(i < 0 || i >= T.length) return;
-  const lo = (i === 0) ? FC_T0 : T[i-1] + 1;
-  const hi = (i === T.length-1) ? FC_T1 : T[i+1] - 1;
-  T[i] = Math.max(lo, Math.min(hi, Math.round(t)));
-  const flo = (i === 0) ? 5 : F[i-1];
-  const fhi = (i === F.length-1) ? 100 : F[i+1];
-  F[i] = Math.max(flo, Math.min(fhi, Math.round(p)));
-  renderFanCurve();
-}
-
-function fcAt(ev){
-  const svg = document.getElementById("fcSvg");
-  const r = svg.getBoundingClientRect();
-  const g = fcGeom();
-  const px = (ev && ev.clientX != null ? ev.clientX : 0) - r.left;
-  const py = (ev && ev.clientY != null ? ev.clientY : 0) - r.top;
-  const scale = (r.width || g.w) / g.w;       // 显示宽度与 viewBox 宽度的比例
-  const t = FC_T0 + (px/scale - g.x0)/g.iw*(FC_T1-FC_T0);
-  const p = 100 - (py/scale - g.y0)/g.ih*100;
-  return {t:t, p:p};
-}
-
-(function bindFanCurve(){
-  const svg = document.getElementById("fcSvg");
-  if(!svg) return;
-  svg.onpointerdown = function(ev){
-    if(!fcCurve) return;
-    const c = fcAt(ev);
-    let best = -1, bd = 1e9;
-    fcCurve.temps.forEach(function(t,i){
-      const d = Math.abs(t - c.t);
-      if(d < bd){ bd = d; best = i; }
-    });
-    fcDrag = best;
-    if(svg.setPointerCapture && ev && ev.pointerId != null){
-      try{ svg.setPointerCapture(ev.pointerId); }catch(e){}
-    }
-    if(ev && ev.preventDefault) ev.preventDefault();
-    fcApplyPoint(fcDrag, c.t, c.p);
-  };
-  svg.onpointermove = function(ev){
-    if(fcDrag < 0) return;
-    const c = fcAt(ev);
-    fcApplyPoint(fcDrag, c.t, c.p);
-    if(ev && ev.preventDefault) ev.preventDefault();
-  };
-  const stop = function(){ fcDrag = -1; };
-  svg.onpointerup = stop;
-  svg.onpointercancel = stop;
-})();
-
-async function fcLoad(){
-  try{
-    const d = await get("/api/fancurve");
-    if(d && d.error) throw new Error(d.error);
-    fcData = d;
-    fcCurve = {temps:((d.curve && d.curve.temps) || []).slice(),
-               fans:((d.curve && d.curve.fans) || []).slice()};
-  }catch(e){
-    fcData = {error:true, note:"读取失败：" + ((e&&e.message)||e)};
-  }
-  renderFanCurve();
-}
-
-async function fcSave(body, okMsg){
-  try{
-    const d = await post("/api/fancurve_set", body);
-    if(d && d.ok === false) throw new Error(d.msg || d.error || "写入被拒");
-    if(d && d.state){
-      fcData = d.state;
-      if(d.state.curve){
-        fcCurve = {temps:d.state.curve.temps.slice(), fans:d.state.curve.fans.slice()};
-      }
-    }
-    fcMsg = okMsg;
-  }catch(e){
-    fcMsg = "操作失败：" + ((e&&e.message)||e);
-  }
-  fcMsgUntil = Date.now() + 8000;
-  renderFanCurve();
-}
-
-document.getElementById("fcApply").onclick = function(){
-  if(!fcCurve) return;
-  return fcSave({enabled:true, temps:fcCurve.temps, fans:fcCurve.fans},
-                "已保存并接管：风扇按此曲线调速");
-};
-document.getElementById("fcOff").onclick = function(){
-  return fcSave({enabled:false}, "已交回 EC 自动");
-};
-document.getElementById("fcReset").onclick = async function(){
-  try{
-    const d = await post("/api/fancurve_reset", {});
-    if(d && d.state){
-      fcData = d.state;
-      if(d.state.curve){
-        fcCurve = {temps:d.state.curve.temps.slice(), fans:d.state.curve.fans.slice()};
-      }
-    }
-    fcMsg = "已恢复出厂曲线（未接管时不影响风扇）";
-  }catch(e){
-    fcMsg = "恢复失败：" + ((e&&e.message)||e);
-  }
-  fcMsgUntil = Date.now() + 8000;
-  renderFanCurve();
-};
-
 tick();
 setInterval(tick, 2000);
-fcLoad();
 
 /* ---- 高度自适应：把真实内容高度报给宿主窗口（WebView2 面板用）----
    教训：窗口高度写死校准值 + body overflow:hidden = 内容一变高就被静默裁掉
