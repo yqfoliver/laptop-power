@@ -499,6 +499,46 @@ function next4() {
      "模式按钮按长度判断后只建一次");
   ok(/chgMsgUntil/.test(main), "充电回执有有效期机制");
 
+  /* ---------------------------------------------- 11.5 新加的两个状态字段真的会显示 */
+  console.log("\n== 11.5 手动锁定倒计时 / 出门规律（字段必须被消费，不是白传）==");
+  load(basePayload({ reason: "前台 code.exe", manual_left_min: 40, auto: false }));
+  T.render(T.getState());
+  ok(/40 分钟后回自动/.test(el("reason").textContent),
+     "手动锁定会把剩余时间写进原因行", el("reason").textContent);
+  load(basePayload({ reason: "前台 code.exe", manual_left_min: 0 }));
+  T.render(T.getState());
+  ok(!/分钟后回自动/.test(el("reason").textContent),
+     "剩余 0 分钟不显示「0 分钟后」（那一拍就该交给自动）",
+     el("reason").textContent);
+
+  // 上面第 4 段的「已下发…」回执还在有效期内会占据 chgLine（这是对的：
+  // 操作回执本来就该压过常规文案）。要验证常规文案，先把时钟推过期。
+  clock.off = 60000;
+  const pNo = basePayload();
+  load(pNo);
+  T.render(T.getState());
+  ok(!/出门/.test(el("chgLine").textContent),
+     "没有出门规律时不往充电行加噪音", el("chgLine").textContent);
+
+  const pAf = basePayload();
+  pAf.battery_info = Object.assign({}, pAf.battery_info, { care: Object.assign(
+    {}, pAf.battery_info.care,
+    { auto_full: { hhmm: "08:10", n: 4, in_min: 30, state: "need_admin" } }) });
+  load(pAf);
+  T.render(T.getState());
+  const afLine = el("chgLine").textContent;
+  ok(/08:10/.test(afLine) && /管理员/.test(afLine),
+     "无权限时要如实说「提前充满需管理员权限」", afLine);
+
+  const pFill = basePayload();
+  pFill.battery_info = Object.assign({}, pFill.battery_info, { care: Object.assign(
+    {}, pFill.battery_info.care,
+    { auto_full: { hhmm: "08:10", n: 4, in_min: 10, state: "filling" } }) });
+  load(pFill);
+  T.render(T.getState());
+  ok(/已提前放开充满/.test(el("chgLine").textContent),
+     "已按出门时间放开上限时要说出来", el("chgLine").textContent);
+
   finish();
 }
 

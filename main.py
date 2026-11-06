@@ -230,6 +230,12 @@ def main(argv=None) -> int:
         webui.open_browser(url)
 
     register_hotkey(traylib_tray.hwnd, cfg.get("hotkey"))
+    # 切档热键（id=2）：不打开面板，循环切「续航 → 办公 → 游戏」。
+    # 失败只影响这条快捷方式（例如组合被别的程序占了），面板照常可用。
+    if not register_hotkey(traylib_tray.hwnd, cfg.get("hotkey_cycle", "Ctrl+Alt+Shift+P"),
+                           hid=2):
+        _log_exit("切档热键注册失败：%s（可能已被其它程序占用）"
+                  % cfg.get("hotkey_cycle"))
 
     if not cfg.get("first_run_done"):
         cfg["first_run_done"] = True
@@ -543,8 +549,11 @@ def parse_hotkey(spec) -> tuple:
     return (mods or (MOD_CTRL | MOD_ALT), vk)
 
 
-def register_hotkey(hwnd: int, spec: str = "Ctrl+Alt+P") -> bool:
+def register_hotkey(hwnd: int, spec: str = "Ctrl+Alt+P", hid: int = 1) -> bool:
     """注册全局热键（组合取自 config.json 的 hotkey）。
+
+    hid 是**热键 id**，WM_HOTKEY 的 wparam 就是它：两个组合必须用不同 id，
+    否则后注册的会把先注册的顶掉（RegisterHotKey 的 id 是窗口内唯一的）。
 
     托盘窗口没建成（hwnd=0）时**不注册**：RegisterHotKey(NULL) 会把组合挂到
     线程队列上，而本程序的消息泵按 hwnd 派发，热键永远没人处理 —— 结果是
@@ -559,7 +568,7 @@ def register_hotkey(hwnd: int, spec: str = "Ctrl+Alt+P") -> bool:
         u.RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint,
                                      ctypes.c_uint]
         u.RegisterHotKey.restype = ctypes.c_int
-        return bool(u.RegisterHotKey(hwnd, 1, mods, vk))
+        return bool(u.RegisterHotKey(hwnd, int(hid), mods, vk))
     except Exception:
         return False
 
@@ -597,6 +606,33 @@ def tray_menu(mgr):
     ]
 
 
+# 热键切档的循环顺序。放在「续航 → 办公 → 游戏」：按一次总是往更吃电的方向
+# 走，第三次回到续航 —— 三档循环，没有第四站「自动」（自动由 TTL 或面板回去）。
+CYCLE_ORDER = ("battery", "office", "gaming")
+
+
+def cycle_mode(mgr) -> dict:
+    """循环切到下一档（供热键用）。返回 {mode, label, note}。
+
+    与「在面板上点档位」同义：锁定该档 + 关掉自动判定。耗电档的锁定会在
+    manual_ttl_min 分钟后被自动交回判定 —— 所以热键按完不用记得改回来。
+    """
+    from lp import config
+    from lp import profiles            # 模块级没有 profiles（它只在 main() 里局部导入）
+    cur = mgr.manual or mgr.current or "office"
+    try:
+        nxt = CYCLE_ORDER[(CYCLE_ORDER.index(cur) + 1) % len(CYCLE_ORDER)]
+    except ValueError:                 # 当前是 balanced 之类的内部档
+        nxt = CYCLE_ORDER[1]
+    mgr.set_manual(nxt)
+    mgr.cfg["auto_mode"] = False
+    config.save(mgr.cfg)
+    left = mgr.manual_left_min()
+    note = ("锁定 %d 分钟，之后交回自动判定" % left) if left else "已锁定，面板可交回自动"
+    return {"mode": nxt,
+            "label": profiles.PROFILES.get(nxt, {}).get("label", nxt), "note": note}
+
+
 def on_tray_cmd(mid, url):
     from lp import config             # 本函数是模块级，config 不能靠 main() 的局部导入名
     from lp import webui
@@ -619,6 +655,14 @@ def on_tray_cmd(mid, url):
             webui.open_browser(url)
         except Exception:
             pass
+    elif mid == traylib.MENU_CYCLE:
+        # 热键切档：与面板点档位同义（锁定 + 关自动），耗电档由 TTL 兜底过期
+        try:
+            r = cycle_mode(mgr)
+            if _TRAY[0]:
+                _TRAY[0].notify("已切到 %s" % r["label"], r["note"], silent=True)
+        except Exception as e:
+            _log_exit("热键切档异常 %r" % (e,))
     elif mid == traylib.MENU_AUTO:
         mgr.cfg["auto_mode"] = not mgr.cfg.get("auto_mode", True)
         config.save(mgr.cfg)
@@ -634,8 +678,7 @@ def on_tray_cmd(mid, url):
     elif mid == traylib.MENU_AUTOSTART:
         toggle_autostart(mgr)
     elif mid == traylib.MENU_RECHECK:
-        mgr.manual = None
-        mgr.cfg["manual_override"] = None
+        mgr.release_manual()
         mgr.apply(mgr.detect(), reason="托盘触发")
     elif mid == traylib.MENU_BALANCED:
         mgr.apply("balanced", reason="托盘：回到系统平衡")

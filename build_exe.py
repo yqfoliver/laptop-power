@@ -27,6 +27,9 @@ cmd = [
     "--hidden-import", "lp.errlog",      # 错误日志（函数内动态 import，漏了=日志永远为空）        # 硬件自适应（manager 里函数内 import）
     "--hidden-import", "lp.gpupick",          # 核显优先调度（同上）
     "--hidden-import", "lp.logtrim",     # 日志概率自清理（main/native_panel 函数内动态 import）
+    # 离电规律判定（batterycare 里静态 import；显式声明只为防静态分析漏掉，
+    # 漏了的表现是「出门前充满」永远不触发，且不报错）
+    "--hidden-import", "lp.departure",
     "--clean", "-y",
     "main.py",
 ]

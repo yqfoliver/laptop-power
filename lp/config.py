@@ -30,6 +30,15 @@ DEFAULT_CONFIG = {
     "auto_mode": True,               # 自动判定开关
     "poll_seconds": 5,
     "manual_override": None,         # 手动锁定的档位名（null=跟随自动）
+    # 手动锁定「耗电档」（游戏/办公）的自动过期（分钟，0=不自动解除）。
+    # 对标荣耀「高能模式」：断电/休眠/重启即失效。真正的痛点不是「想一直锁」，
+    # 而是**锁了忘了关** —— 一天都在按游戏档烧电，而界面早已不看。
+    # 到期后回到自动判定：那时若确实还在打游戏/重负载，自动会重新判成同一档，
+    # 等于「续期」；只有已经不需要了才会真的回落 —— 所以默认 60 分钟不唐突。
+    "manual_ttl_min": 60,
+    # 手动锁定的起始时刻（epoch 秒）。只在 manual_override 生效时有意义；
+    # 落盘是为了「重启一次 ≠ TTL 续期一次」—— 这是两条独立的事实，别合并。
+    "manual_since": 0,
     "system_whitelist": [
         "explorer.exe", "dwm.exe", "shellexperiencehost.exe", "searchhost.exe",
         "startmenuexperiencehost.exe", "textinputhost.exe", "ctfmon.exe",
@@ -48,6 +57,10 @@ DEFAULT_CONFIG = {
     "autostart_notified": True,      # 已取消"首次运行提示自启"的气泡，视为已提示过
     "learn_enabled": True,            # 自学习总开关
     "hotkey": "Ctrl+Alt+P",
+    # 第二个热键：不开面板直接循环切档（续航→办公→游戏）。对标惠普/荣耀的
+    # Fn+P —— 但 Fn 键归 EC，我们拦不到，所以退一步用组合键。档位是「必须由
+    # 人表达」的偏好，给它一条键盘通道不算加旋钮。
+    "hotkey_cycle": "Ctrl+Alt+Shift+P",
     "last_profile": "balanced",
     # Windows 节能模式让位（2026-10-17）：离电时系统已把电源模式滑块压到
     # 「最佳能效」（Energy Saver 自动/手动触发）期间，工具不再叠加自己的
@@ -116,6 +129,11 @@ DEFAULT_CONFIG = {
     "care_full_intent_h": 24.0,          # 「本次充满」意图的有效期（小时，超时自动结束）
     "care_mobile_dc_h_day": 1.0,         # 日均离电 ≥ 此值判为「常带出门」
     "care_scene_days": 7,                # 场景判定的回看天数
+    # --- 离电前自动充满（2026-11-06）---
+    # 从历史「插电→离电」时刻学出门规律（lp/departure.py），到点前 40 分钟把
+    # 上限放开到 100%。必须能写 HKLM 才动手（见 hw.charge_limit_writable）：
+    # 写不了只显示、不弹 UAC —— 自动行为弹框比不充满更糟。
+    "auto_full_enabled": True,
 
     # ---------------- 合盖不休眠 / 常驻瘦身（2026-10-06 新增，对标 G-Helper） ----------------
     # 笔记本接外接显示器当台式机用时，Windows 默认合盖即睡眠。开启后：检测到
@@ -316,6 +334,8 @@ _NUM_LIMITS = {
     "care_full_intent_h": (0.0, 720.0),
     "care_mobile_dc_h_day": (0.0, 24.0),
     "care_scene_days": (1, 90),
+    # 手动锁定耗电档的自动过期（0=不解除）
+    "manual_ttl_min": (0, 1440),
 }
 
 

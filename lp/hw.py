@@ -981,6 +981,27 @@ def asus_charge_limit() -> dict:
     return out
 
 
+def charge_limit_writable() -> bool:
+    """当前令牌能不能写充电上限（只需探测一次，调用方自己缓存）。
+
+    为什么单独一个函数：自动逻辑（离电前充满）必须**先知道能不能写**，
+    再决定动不动手 —— 否则只能靠"写完发现被拒"，那就变成每次都要弹一次
+    UAC 的自动行为，比不充满更糟。
+    """
+    for hive, path, name in _ASUS_CHARGE_KEYS:
+        try:
+            h = winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE)
+            winreg.CloseKey(h)
+            return True
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            return False          # 键在、但当前令牌写不了
+        except Exception:
+            continue
+    return False
+
+
 def set_asus_charge_limit(value: int) -> dict:
     """写华硕充电上限（只接受 60 / 80 / 100）。
 

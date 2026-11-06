@@ -283,7 +283,13 @@ function render(){
   document.getElementById("mode").textContent = state.mode_label||"—";
   // 不写「原因：」前缀：模式标题 + 右下「前台 xxx」已经交代上下文，
   // 三个装饰字纯噪音（2026-10-20 UI 精简，native 同步）
-  document.getElementById("reason").textContent = state.reason||"—";
+  // 手动锁定耗电档会自己到期（backend manual_ttl_min）——剩余时间就写在这行，
+  // 不新增 DOM 节点：加节点要重新校准高度，而这一行本来就随状态变化。
+  var reasonTxt = state.reason||"—";
+  var left = state.manual_left_min;
+  if(left !== null && left !== undefined && left > 0)
+    reasonTxt += " · 约 " + left + " 分钟后回自动";
+  document.getElementById("reason").textContent = reasonTxt;
   // Windows 节能模式让位提示（2026-10-17）：只在系统真的在替我们限频时出现
   try{ document.getElementById("esaverNote").hidden = !state.energy_saver; }catch(e){}
   const auto = state.auto;
@@ -464,6 +470,14 @@ function renderCharge(care){
     // 2026-10-20 UI 精简：场景尾巴（长期插电/常带出门）撤掉——advice 里
     // 已经说清；满充校准是面板上唯一的提醒位，压成 6 个字留下
     t += " · 该做满充校准";
+  }else if(care.auto_full && care.auto_full.hhmm){
+    // 学出来的出门规律（backend lp/departure.py）：只在窗口附近或需要权限时
+    // 才露头，平时整行不加噪音。
+    const AF = care.auto_full, afs = AF.state;
+    if(afs==="need_admin")
+      t += " · 通常 " + AF.hhmm + " 出门，提前充满需管理员权限";
+    else if(afs==="filling" || afs==="active")
+      t += " · 通常 " + AF.hhmm + " 出门，已提前放开充满";
   }
   line.textContent = t;
 }

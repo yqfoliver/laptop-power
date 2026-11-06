@@ -490,8 +490,7 @@ class NativePanel:
             def run():
                 try:
                     if mgr.manual:
-                        mgr.manual = None
-                        mgr.cfg["manual_override"] = None
+                        mgr.release_manual()
                     mgr.apply(mgr.detect(), reason="面板：重新判定")
                 except Exception:
                     pass

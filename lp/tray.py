@@ -50,6 +50,7 @@ NIF_TIP = 0x00000004
 NIF_INFO = 0x00000010
 NIIF_INFO = 0x00000001
 NIIF_USER = 0x00000004
+NIIF_NOSOUND = 0x00000010        # 不响提示音（用户要求全程静音）
 
 _u = ctypes.WinDLL("user32", use_last_error=True)
 _s = ctypes.WinDLL("shell32", use_last_error=True)
@@ -103,6 +104,7 @@ MENU_QUIT = 1006
 MENU_LEARN = 1007
 MENU_AUTOSTART = 1008
 MENU_SETTINGS = 1009
+MENU_CYCLE = 1010                # 热键 2：循环切档（不开面板）
 
 _u.CreateIconFromResource.restype = wintypes.HICON
 _u.CreateIconFromResource.argtypes = [c_void_p, wintypes.DWORD, wintypes.DWORD,
@@ -221,7 +223,11 @@ class Tray:
                     self._dispatch(MENU_OPEN)
                 return 0
             if msg == WM_HOTKEY:
-                self._dispatch(MENU_OPEN)
+                # wparam = 热键 id（注册时给的）。1=开面板，2=循环切档。
+                # 以前这里不看 id 一律开面板，加了第二个组合之后若还这样，
+                # 切档键会静默变成"打开面板"（按键有反应，但反应是错的）。
+                hid = int(wparam or 0)
+                self._dispatch(MENU_CYCLE if hid == 2 else MENU_OPEN)
                 return 0
             if msg == WM_POWERBROADCAST:
                 # 挂起前必须来得及：调用方只做「非阻塞写 + 置标志」，别在这里
@@ -341,7 +347,7 @@ class Tray:
         self._fill(nid, text)
         return bool(_s.Shell_NotifyIconW(1, byref(nid)))
 
-    def notify(self, title: str, text: str) -> bool:
+    def notify(self, title: str, text: str, silent: bool = False) -> bool:
         nid = NOTIFYICONDATA()
         self._fill(nid, "笔记本电源自适应")
         nid.hWnd = self.hwnd
@@ -350,8 +356,8 @@ class Tray:
         nid.szTip = "笔记本电源自适应"
         nid.szInfo = (text or "")[:255]
         nid.szInfoTitle = (title or "")[:63]
-        nid.dwInfoFlags = NIIF_INFO | NIIF_USER
-        nid.uTimeoutOrVersion = 3500
+        nid.dwInfoFlags = NIIF_INFO | NIIF_USER | (NIIF_NOSOUND if silent else 0)
+        nid.uTimeoutOrVersion = 3000 if silent else 3500
         return bool(_s.Shell_NotifyIconW(1, byref(nid)))
 
     def hide(self) -> None:

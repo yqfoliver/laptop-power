@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import Callable, Dict, List, Optional
@@ -85,6 +86,18 @@ class Manager:
         self.on_notify = on_notify
         self.current = None          # 首次 apply 前不假设任何档位，避免漏掉初始化
         self.manual = cfg.get("manual_override") or None
+        # 手动锁定的起始时刻。**必须跨重启落盘**（manual_since）：否则程序重启
+        # 一次就等于把 TTL 续了一次，"临时加速"又会变成永久开启。
+        try:
+            self._manual_at = float(cfg.get("manual_since") or 0)
+        except (TypeError, ValueError):
+            self._manual_at = 0.0
+        self._manual_dropped = ""
+        # 离电前自动充满的状态（面板读它，见 auto_full_tick）
+        self._auto_full: dict = {}
+        self._auto_full_day = ""
+        self._chg_writable: Optional[bool] = None   # 只在首次使用时探测一次
+        self._drop_manual_on_boot()
         # 静默底线下的可诊断性：吞咽的异常进 error.log（只写文件，不弹任何东西）
         try:
             from . import errlog
@@ -630,10 +643,25 @@ class Manager:
                 pass
 
     # ------------------------------------------------------------ 手动锁定
+    def _drop_manual_on_boot(self) -> None:
+        """耗电档的锁定不跨重启（对标荣耀高能模式：重启/休眠即失效）。
+
+        只清「耗电档」——锁在续航档是保守选择，留着不会有代价。被清掉的档位
+        记在 _manual_dropped，由 _loop 在首轮 apply 之后如实说一句，别让档位
+        悄悄变样（「回执必须说真话」）。
+        """
+        if self.manual not in self._TTL_MODES:
+            return
+        self._manual_dropped = self.manual
+        self.release_manual()
+        self.cfg["auto_mode"] = True
+
     def set_manual(self, name: Optional[str]) -> None:
         """手动选档 = 给当前前台程序投一票，攒够了就记住"""
         self.manual = name
+        self._manual_at = time.time() if name else 0.0
         self.cfg["manual_override"] = name
+        self.cfg["manual_since"] = self._manual_at
         config.save(self.cfg)
 
         reason = "手动指定" if name else "取消锁定"
@@ -653,10 +681,160 @@ class Manager:
         self.apply(name or self.detect(), reason=reason)
 
     def set_auto(self) -> None:
-        self.manual = None
-        self.cfg["manual_override"] = None
+        self.release_manual()
         config.save(self.cfg)
         self.apply(self.detect(), reason="切换到自动")
+
+    def release_manual(self) -> None:
+        """清掉手动锁定（含起始时刻），不落盘、不切档。
+
+        所有「回到自动」的入口都走这里：面板、托盘、原生面板、过期。
+        散落各处手写 `manual_override = None` 会漏掉 `manual_since`，
+        留下一个永远对不上的时间戳 —— 配置项撒谎比没有更糟。
+        """
+        self.manual = None
+        self._manual_at = 0.0
+        self.cfg["manual_override"] = None
+        self.cfg["manual_since"] = 0
+
+    # --------------------------------------------------- 手动锁定的自动过期
+    # 语义（对标荣耀「高能模式」/惠普 OMEN 的性能模式）：手动加速是**临时**的。
+    # 这里只对耗电档（gaming/office）设期限：锁在续航档是保守选择，没有代价，
+    # 给它加倒计时反而会让用户以为「省电也会自己跑掉」。
+    _TTL_MODES = ("gaming", "office")
+
+    def manual_ttl_s(self) -> float:
+        """冷却时长（秒）；0 = 不自动解除。配置不可信 ⇒ 夹范围。"""
+        try:
+            v = float(self.cfg.get("manual_ttl_min", 60))
+        except (TypeError, ValueError):
+            v = 60.0
+        if v != v or v <= 0:                      # NaN / 关闭
+            return 0.0
+        return min(v, 1440.0) * 60.0
+
+    def manual_left_min(self) -> Optional[int]:
+        """手动锁定还剩多少分钟（向上取整）；不适用时 None。"""
+        if not self.manual or self.manual not in self._TTL_MODES:
+            return None
+        ttl = self.manual_ttl_s()
+        if ttl <= 0:
+            return None
+        left = self._manual_at + ttl - time.time()
+        if left <= 0:
+            return 0
+        return int(math.ceil(left / 60.0))
+
+    def _manual_tick(self) -> None:
+        """每拍检查手动锁定是否过期。过期就交回自动判定。
+
+        必须放在 `_loop` 的自动分支**之外**：手动档下 `_loop` 整段跳过检测，
+        过期逻辑挂在里面等于永远不执行（"写了没接线"的经典形态）。
+        """
+        if not self.manual or self.manual not in self._TTL_MODES:
+            return
+        ttl = self.manual_ttl_s()
+        if ttl <= 0:
+            return
+        # 时钟回拨 / 从未记过起始时刻：补记一个，本轮不判过期。
+        # （直接当过期处理会让「刚锁上就被解掉」变成偶发现象。）
+        if self._manual_at <= 0 or self._manual_at > time.time() + 60:
+            self._manual_at = time.time()
+            self.cfg["manual_since"] = self._manual_at
+            try:
+                config.save(self.cfg)
+            except Exception:
+                pass
+            return
+        if time.time() - self._manual_at < ttl:
+            return
+        was = PROFILES.get(self.manual, {}).get("label", self.manual)
+        self.release_manual()
+        self.cfg["auto_mode"] = True        # 面板的「自动判定」开关要跟着亮回去
+        try:
+            config.save(self.cfg)
+        except Exception:
+            pass
+        self.governor.reset()               # 交回自动时别带着旧的候选计数
+        self.apply(self.detect(),
+                   reason="「%s」已锁定 %d 分钟，交回自动判定"
+                          % (was, int(ttl // 60)))
+
+    # ------------------------------------------------- 离电前自动充满（B 之后）
+    # 学你平时几点拔电（lp/departure.py），到点前 40 分钟把上限提到 100%。
+    # 前提是**能写**：常驻进程是普通权限，写华硕的 HKLM 上限会被拒。被拒时
+    # 绝不弹 UAC —— 自动行为弹框比不充满更糟（人可能已经走了），只把事实写进
+    # 状态，由面板如实显示「需要管理员权限」。
+    def _charge_writable(self) -> bool:
+        if self._chg_writable is None:
+            try:
+                self._chg_writable = bool(hw.charge_limit_writable())
+            except Exception:
+                self._chg_writable = False
+        return self._chg_writable
+
+    def _restore_charge_tick(self, care) -> None:
+        """上一次「本次充满」用过之后，插回电源就把上限交回养护值。
+
+        为什么必须做：`clear_intent()` 只结束「意图」，**不会把上限改回去**。
+        于是出门前放开到 100%、回来插上就一直是 100% —— 养护被自己关掉，
+        而面板上 intent 早已结束、看起来一切正常。写不了就等用户点「回养护」，
+        这里绝不提权（自动行为弹 UAC 比不改更糟）。
+        """
+        try:
+            if care.intent_active() or not care.restore_due():
+                return
+            if not self._charge_writable():
+                return
+            w = care.apply_limit(care.target_limit)
+            if w.get("ok"):
+                care.clear_restore_due()
+        except Exception as _e:
+            self._err("auto_full.restore", _e)
+
+    def auto_full_tick(self, on_ac: bool) -> None:
+        care = getattr(self, "care", None)
+        if care is None or not getattr(care, "enabled", True):
+            self._auto_full = {}
+            return
+        if not on_ac or not self.cfg.get("auto_full_enabled", True):
+            self._auto_full = {}
+            return
+        # 先收尾上一次「本次充满」：出门时放开到 100%，插回来就得交回养护值，
+        # 否则 100% 会一直留着 —— 等于养护被自己关掉，而且没有任何提示。
+        self._restore_charge_tick(care)
+        pred = care.next_departure()
+        if not pred:
+            self._auto_full = {}
+            return
+        st = {"hhmm": pred.get("hhmm"), "n": pred.get("n"),
+              "in_min": pred.get("in_min")}
+        # 已经因为「要出门」放开了：如实显示，不要重复下单
+        if care.intent_active():
+            self._auto_full = dict(st, state="active")
+            return
+        if not pred.get("due"):
+            self._auto_full = dict(st, state="watching")
+            return
+        today = time.strftime("%Y-%m-%d")
+        if self._auto_full_day == today:
+            self._auto_full = dict(st, state="done_today")
+            return
+        pct = (self.last_battery or {}).get("percent")
+        if pct is not None and float(pct) >= care.full_limit - 1:
+            self._auto_full_day = today
+            self._auto_full = dict(st, state="already_full")
+            return
+        if not self._charge_writable():
+            # 关键：只记录，不弹 UAC、不再重试（面板会显示 need_admin）
+            self._auto_full = dict(st, state="need_admin")
+            return
+        w = (care.set_full_intent(reason="auto_travel", hours=care.intent_h)
+             .get("write") or {})
+        self._auto_full_day = today
+        self._auto_full = dict(st, state="filling" if w.get("ok") else "failed")
+        if not w.get("ok"):
+            self._err("auto_full.write", RuntimeError(str(w.get("reason") or "写入失败")))
 
     # ------------------------------------------------------------ 自学习接口
     def learn_report(self) -> dict:
@@ -774,6 +952,14 @@ class Manager:
             "nvml_mode": self.nvml.mode(),
             "knobs": knobs,
             "auto": bool(self.cfg.get("auto_mode", True)) and not self.manual,
+            # 手动锁定耗电档的剩余时间（分钟）。None = 不适用（没锁 / 锁的是
+            # 续航档 / 关掉了自动解除）。面板据此显示「约 N 分钟后回自动」。
+            "manual_left_min": self.manual_left_min(),
+            "manual_ttl_min": int(self.manual_ttl_s() // 60),
+            # 离电前自动充满：{hhmm,n,in_min,state}；state ∈
+            # watching / due→filling / active / already_full / done_today /
+            # need_admin（无权限）/ failed
+            "auto_full": dict(self._auto_full),
             "changed": self.last_changed,
             "learn_on": bool(self.cfg.get("learn_enabled", True)),
             "learn_rules": len(self.learner.data.get("rules", {})),
@@ -2352,7 +2538,7 @@ class Manager:
         b["brightness_applied"] = self._br_applied
         b["brightness_dimmed"] = self._br_dimmed
         b["brightness_cap"] = self._br_cap_target()
-        b["care"] = self.care.report()
+        b["care"] = dict(self.care.report(), auto_full=dict(self._auto_full))
         b["care_line"] = self.care.summary_line()
         # 华硕「电池健康充电」上限（只读镜像值，装 MyASUS 后才有）
         b["charge_line"] = self.care.charge_line()
@@ -2391,6 +2577,23 @@ class Manager:
                 st = dict(hw.power_status())
                 st["ac"] = self._ac_confirmed(st.get("ac"))
                 on_ac_now = st["ac"]
+                # 手动锁定的自动过期：必须在这里（自动分支之外）——
+                # 手动档下 `_loop` 整段跳过检测，挂在里面就等于永远不执行。
+                try:
+                    self._manual_tick()
+                except Exception as _e:
+                    self._err("manual_tick", _e)
+                # 离电前自动充满：与档位无关（充电上限是另一条通道）
+                try:
+                    self.auto_full_tick(on_ac_now)
+                except Exception as _e:
+                    self._err("auto_full", _e)
+                # 重启时被交回自动的手动锁定：说一句，别让档位悄悄变样
+                if self._manual_dropped and self.current:
+                    self.last_reason = "重新启动，上次手动锁定的「%s」已交回自动" % (
+                        PROFILES.get(self._manual_dropped, {}).get("label")
+                        or self._manual_dropped)
+                    self._manual_dropped = ""
                 # 原因文本保鲜：拔电/插电但档位没变时，「插电中/使用电池」要跟着改，
                 # 否则会出现「用着电池、原因却写着插电中」的乌龙。
                 # 游戏档除外 —— 那里的原因由功耗分配器实时写，别覆盖。

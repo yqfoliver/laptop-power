@@ -218,8 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             elif key == "":                            # 空 = 取消锁定、回到自动
                 from . import config as cfgmod
                 mgr.cfg["auto_mode"] = True
-                mgr.manual = None
-                mgr.cfg["manual_override"] = None
+                mgr.release_manual()
                 cfgmod.save(mgr.cfg)
                 mgr.set_auto()
                 self._json(200, mgr.status())
@@ -297,9 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             cfgmod.save(mgr.cfg)
             self._json(200, {"ok": True})
         elif path == "/api/recheck":
-            if mgr.manual:
-                mgr.manual = None
-                mgr.cfg["manual_override"] = None
+            mgr.release_manual()
             mgr.apply(mgr.detect(), reason="手动触发重新判定")
             self._json(200, mgr.status())
         elif path == "/api/autostart":

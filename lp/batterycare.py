@@ -67,11 +67,13 @@ from typing import Dict, List, Optional
 if __package__:
     from . import powercfgctl as pc
     from . import hw as _hw
+    from . import departure
 else:                                     # 直接运行本文件自测
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from lp import powercfgctl as pc
     from lp import hw as _hw
+    from lp import departure
 
 GUID_SUB_PROC = "54533251-82be-4824-96c1-47b60b740d00"
 GUID_THROTTLE_MAX = "bc5038f7-23e0-4960-96da-33abaf5935ec"     # PROCTHROTTLEMAX
@@ -110,6 +112,9 @@ class BatteryCare:
         self._limit_state = self._data.get("limit_state") or None
         self._last_save = 0.0
         self._last_feed = 0.0
+        # 上一拍的插电状态：feed 每拍只看到「现在」，看不到「刚才是插着的」。
+        # 离电时刻（ac True→False）就是靠这个跳变记下来的（见 lp/departure.py）。
+        self._last_ac: Optional[bool] = None
         self._relief_on = False
         self._relief_base_ac: Optional[int] = None
         self._relief_reason = ""
@@ -293,6 +298,16 @@ class BatteryCare:
         ac = bool(batt.get("ac"))
         # 插电/离电时长：场景判定（desk / mobile）的唯一依据
         b["ac_s" if ac else "dc_s"] = b.get("ac_s" if ac else "dc_s", 0.0) + dt
+        # 离电时刻（2026-11-06）：插电 → 离电的跳变就是一次「出门」。
+        # 只记时刻，判定在 lp/departure.py（纯函数）；同一次出门 30 分钟内
+        # 只记一条，所以合盖再开盖、接触抖动都不会污染样本。
+        if self._last_ac is True and not ac:
+            try:
+                if departure.record(self._data.setdefault("departures", []), now):
+                    self._save(force=True)
+            except Exception:
+                pass
+        self._last_ac = ac
         # 意图过期 / 已带出去用过 → 自动结束（不等用户回来手动清）
         self._intent_tick(ac, pct)
         charging = bool(batt.get("charging"))
@@ -582,10 +597,13 @@ class BatteryCare:
         """意图的自动结束：过期，或「已经带出去用过了」（离电且电量掉到 90% 以下）。
 
         不留给用户手动清——忘了清就永远停在 100%，养护等于白设。
+        结束的同时挂一个「回来要还原」的标记：**结束意图 ≠ 上限已经回去了**，
+        以前两者混为一谈，拔电后上限一直留在 100%（养护被自己悄悄关掉）。
         """
         if not isinstance(self._intent, dict):
             return
         if not self.intent_active():
+            self._data["restore_due"] = True
             self.clear_intent("充满意图到期，已自动结束")
             return
         if (not ac) and pct is not None and float(pct) <= 90.0:
@@ -593,7 +611,17 @@ class BatteryCare:
                 # 校准的关键动作是「完整用到低电量再充满」，走到这一步才算完成
                 self._last_calib = self._day_key()
                 self._data["last_calib"] = self._last_calib
+            self._data["restore_due"] = True
             self.clear_intent("已拔电使用，本次充满结束")
+
+    # ------------------------------------------- 出门后回来要交回养护上限
+    def restore_due(self) -> bool:
+        """上一次「本次充满」用过之后，是否还欠一次「交回养护上限」。"""
+        return bool(self._data.get("restore_due"))
+
+    def clear_restore_due(self) -> None:
+        self._data["restore_due"] = False
+        self._save(force=True)
 
     def set_full_intent(self, reason: str = "manual",
                         hours: Optional[float] = None) -> Dict:
@@ -608,6 +636,7 @@ class BatteryCare:
                         "expire": time.time() + max(0.5, h) * 3600.0,
                         "prev_limit": cur, "target": self.full_limit}
         self._data["intent"] = self._intent
+        self._data["restore_due"] = False      # 新一次出门，还欠的还原就此作废
         self._save(force=True)
         res = self.apply_limit(self.full_limit)
         return {"ok": True, "intent": dict(self._intent), "write": res}
@@ -709,6 +738,8 @@ class BatteryCare:
     def restore_limit(self) -> Dict:
         """回到养护上限，并结束意图。"""
         res = self.apply_limit(self.target_limit)
+        if res.get("ok"):
+            self._data["restore_due"] = False
         self.clear_intent("已回到养护上限 %d%%" % self.target_limit)
         return {"write": res}
 
@@ -743,6 +774,17 @@ class BatteryCare:
         if v < 0:
             return "unknown"
         return "mobile" if v >= self.mobile_dc_h else "desk"
+
+    def next_departure(self, now: Optional[float] = None) -> Optional[Dict]:
+        """你现在是不是快到平时出门的点了（学出来的作息）。
+
+        None = 样本不足或不在窗口内。窗口内返回
+        {hhmm, n, in_min, due, lead_min}，明细见 lp/departure.py。
+        """
+        try:
+            return departure.predict(self._data.get("departures") or [], now)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------ 评估
     @staticmethod
@@ -981,6 +1023,8 @@ class BatteryCare:
             "full_limit": self.full_limit,
             "calib_due": self.calib_due(),
             "calib_days_since": self.calib_days_since(),
+            # 学出来的出门规律（None = 样本不足 / 现在不在窗口里）
+            "departure": self.next_departure(),
             "today": dict(self._data.get("days", {}).get(self._today_key) or {}),
         }
 
